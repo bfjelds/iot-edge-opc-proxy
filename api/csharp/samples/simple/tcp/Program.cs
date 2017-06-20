@@ -33,7 +33,7 @@ namespace Microsoft.Azure.Devices.Proxy.Samples {
             for (int j = 1; ; j++) {
                 Console.Clear();
                 Console.Out.WriteLine($"#{j} Sync tests...");
-#if !PERF
+#if PERF
                 for (int i = 0; i < j + 1; i++) {
                     try {
                         SendReceive(7, Encoding.UTF8.GetBytes("Simple test to echo server"));

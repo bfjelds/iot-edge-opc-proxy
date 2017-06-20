@@ -10,6 +10,7 @@ namespace Microsoft.Azure.Devices.Proxy {
     using System.Linq;
     using System.Threading;
     using System.Threading.Tasks;
+    using System.Threading.Tasks.Dataflow;
 
     /// <summary>
     /// Virtual socket connected to a set of proxies that provide browse services.
@@ -106,7 +107,7 @@ namespace Microsoft.Azure.Devices.Proxy {
             };
             var buffer = new MemoryStream();
             await request.EncodeAsync(buffer, _codec, ct);
-            await SendAsync(new Message(null, null, null,
+            await SendBlock.SendAsync(new Message(null, null, null, 
                 new DataMessage(buffer.ToArray())), ct).ConfigureAwait(false);
         }
 
@@ -119,10 +120,7 @@ namespace Microsoft.Azure.Devices.Proxy {
             if (!_connected) {
                 throw new SocketException(SocketError.Closed);
             }
-            Message message;
-            while (!ReceiveQueue.TryDequeue(out message)) {
-                await ReceiveAsync(ct).ConfigureAwait(false);
-            }
+            var message = await ReceiveBlock.ReceiveAsync(ct).ConfigureAwait(false);
             ProxySocket.ThrowIfFailed(message);
             if (message.Error != (int)SocketError.Success) {
                 throw new SocketException((SocketError)message.Error);
@@ -139,6 +137,23 @@ namespace Microsoft.Azure.Devices.Proxy {
             var response = await BrowseResponse.DecodeAsync(stream, _codec, ct);
             response.Interface = message.Proxy.ToSocketAddress();
             return response;
+        }
+
+
+
+        public override Task ListenAsync(int backlog, 
+            CancellationToken ct) {
+            throw new NotSupportedException("Cannot call listen on browse socket");
+        }
+
+        public override Task<int> SendAsync(ArraySegment<Byte> buffer, SocketAddress endpoint,
+            CancellationToken ct) {
+            throw new NotSupportedException("Cannot call send on browse socket");
+        }
+
+        public override Task<ProxyAsyncResult> ReceiveAsync(ArraySegment<byte> buffer, 
+            CancellationToken ct) {
+            throw new NotSupportedException("Cannot call receive on browse socket");
         }
 
         private bool _connected;

@@ -301,6 +301,8 @@ typedef enum prx_socket_option
     prx_so_ip_multicast_join,
     prx_so_ip_multicast_leave,
 
+    prx_so_props_timeout,
+
     // ...
 
     __prx_so_max

@@ -10,6 +10,7 @@ namespace Microsoft.Azure.Devices.Proxy {
     using System.Collections.Concurrent;
     using System.Threading;
     using System.Threading.Tasks;
+    using System.Threading.Tasks.Dataflow;
 
     /// <summary>
     /// Proxy link represents a 1:1 link with a remote socket. Proxy
@@ -42,6 +43,7 @@ namespace Microsoft.Azure.Devices.Proxy {
         /// </summary>
         public SocketAddress ProxyAddress => Proxy.Address.ToSocketAddress();
 
+
         /// <summary>
         /// Constructor for proxy link object
         /// </summary>
@@ -52,12 +54,20 @@ namespace Microsoft.Azure.Devices.Proxy {
         /// <param name="peerAddress"></param>
         internal ProxyLink(ProxySocket socket, INameRecord proxy, Reference remoteId, 
             SocketAddress localAddress, SocketAddress peerAddress) {
-            _streamId = new Reference();
-            _socket = socket;
-            Proxy = proxy;
-            RemoteId = remoteId;
-            LocalAddress = localAddress;
-            PeerAddress = peerAddress;
+
+            _socket = socket ?? throw new ArgumentNullException(nameof(socket));
+
+            Proxy = proxy ?? throw new ArgumentNullException(nameof(proxy));
+            RemoteId = remoteId ?? throw new ArgumentNullException(nameof(remoteId));
+            LocalAddress = localAddress ?? throw new ArgumentNullException(nameof(localAddress));
+            PeerAddress = peerAddress ?? throw new ArgumentNullException(nameof(peerAddress));
+
+            var option = new DataflowBlockOptions {
+                // Todo - set up data flow options for the link
+            };
+
+            SendBlock = new BufferBlock<Message>(option);
+            ReceiveBlock = new BufferBlock<Message>(option);
         }
 
         /// <summary>
@@ -70,6 +80,7 @@ namespace Microsoft.Azure.Devices.Proxy {
             try {
                 _connection = await _socket.Provider.StreamService.CreateConnectionAsync(
                     _streamId, RemoteId, Proxy).ConfigureAwait(false);
+
                 return new OpenRequest {
                     ConnectionString = _connection.ConnectionString != null ?
                         _connection.ConnectionString.ToString() : "",
@@ -84,6 +95,16 @@ namespace Microsoft.Azure.Devices.Proxy {
         }
 
         /// <summary>
+        /// Target buffer block
+        /// </summary>
+        public IPropagatorBlock<Message, Message> SendBlock { get; private set; }
+
+        /// <summary>
+        /// Source buffer block
+        /// </summary>
+        public IPropagatorBlock<Message, Message> ReceiveBlock { get; private set; }
+
+        /// <summary>
         /// Complete connection by waiting for remote side to connect.
         /// </summary>
         /// <param name="ct"></param>
@@ -92,46 +113,13 @@ namespace Microsoft.Azure.Devices.Proxy {
             if (_connection == null)
                 return false;
             try {
-                _stream = await _connection.OpenAsync(ct).ConfigureAwait(false);
+                await _connection.OpenAsync(this, ct).ConfigureAwait(false);
                 return true;
             }
             catch (OperationCanceledException) {
                 return false;
             }
         }
-
-        /// <summary>
-        /// Receive queue from stream to read from
-        /// </summary>
-        public ConcurrentQueue<Message> ReceiveQueue => 
-            _stream?.ReceiveQueue;
-
-        /// <summary>
-        /// Receive more on link stream
-        /// </summary>
-        /// <param name="ct"></param>
-        /// <returns></returns>
-        public async Task ReceiveAsync(CancellationToken ct) {
-            if (_stream == null) {
-                throw new SocketException(SocketError.Closed);
-            }
-            await _stream.ReceiveAsync(ct);
-        }
-
-        /// <summary>
-        /// Forward cloned message through this link
-        /// </summary>
-        /// <param name="message"></param>
-        /// <param name="ct"></param>
-        /// <returns></returns>
-        public async Task SendAsync(Message message, CancellationToken ct) {
-            if (_stream == null) {
-                throw new SocketException(SocketError.Closed);
-            }
-            await _stream.SendAsync(new Message(
-                _streamId, RemoteId, Proxy.Address, message.Content), ct);
-        }
-
 
         /// <summary>
         /// Send socket option message
@@ -172,7 +160,7 @@ namespace Microsoft.Azure.Devices.Proxy {
         /// </summary>
         /// <param name="ct"></param>
         public async Task CloseAsync(CancellationToken ct) {
-            var tasks = new Task[] { UnlinkAsync(ct), CloseStreamAsync(ct) };
+            var tasks = new Task[] { UnlinkAsync(ct), TerminateConnectionAsync(ct) };
             try {
                 // Close both ends
                 await Task.WhenAll(tasks).ConfigureAwait(false);
@@ -194,14 +182,12 @@ namespace Microsoft.Azure.Devices.Proxy {
         /// </summary>
         /// <param name="ct"></param>
         /// <returns></returns>
-        private async Task CloseStreamAsync(CancellationToken ct) {
+        private async Task TerminateConnectionAsync(CancellationToken ct) {
             IConnection connection = _connection;
-            IMessageStream stream = _stream;
             _connection = null;
-            _stream = null;
             try {
-                ProxyEventSource.Log.StreamClosing(this, _stream);
-                await stream.SendAsync(new Message(_socket.Id, RemoteId, 
+                ProxyEventSource.Log.StreamClosing(this, null);
+                await SendBlock.SendAsync(new Message(_socket.Id, RemoteId, 
                     new CloseRequest()), ct).ConfigureAwait(false);
             }
             finally {
@@ -243,9 +229,8 @@ namespace Microsoft.Azure.Devices.Proxy {
               + $"with stream {_streamId} (Socket {_socket})";
         }
 
-        private IMessageStream _stream;
-        private readonly ProxySocket _socket;
         private IConnection _connection;
-        private readonly Reference _streamId;
+        private readonly ProxySocket _socket;
+        private readonly Reference _streamId = new Reference();
     }
 }

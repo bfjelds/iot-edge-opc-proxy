@@ -209,8 +209,7 @@ Operations (Mutually exclusive):
         }
 
         /// <summary>
-        /// When all service types were browsed in all domains for period milliseconds, 
-        /// browse all service records 
+        /// Browse files in a particular folder recursively
         /// </summary>
         static async Task BrowseFilesRecursiveAsync(SocketAddress proxy, string folder,
             int period, bool cache) {
@@ -279,7 +278,7 @@ Operations (Mutually exclusive):
         }
 
         /// <summary>
-        /// Browse service names or types
+        /// Resolve service names 
         /// </summary>
         static async Task<IEnumerable<DnsServiceEntry>> ResolveServiceAsync(DnsServiceRecord record, 
             int period, bool fromCache) {
@@ -355,8 +354,7 @@ Operations (Mutually exclusive):
         }
 
         /// <summary>
-        /// When all service types were browsed in all domains for period milliseconds, 
-        /// browse all service records 
+        /// When all service records were browsed for period milliseconds, resolve them
         /// </summary>
         static async Task<HashSet<DnsServiceEntry>> ResolveServiceNamesAsync(int period) {
             var entries = new HashSet<DnsServiceEntry>();

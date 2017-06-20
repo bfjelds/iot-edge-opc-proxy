@@ -31,6 +31,7 @@ struct prx_server
     io_connection_t* listener;     // connection used by server to listen
     io_transport_t* transport;                 // Transport instance used
     prx_browse_server_t* browser;              // Internal browser server
+#define DEFAULT_RESTRICTED_PORTS ""
     int32_t* restricted_ports;    // Tuple range list of restricted ports
     size_t restricted_port_count;       // Number of tuples in restricted
     struct hashtable* sockets;                  // List of active sockets
@@ -66,6 +67,8 @@ typedef struct prx_server_socket
 
     prx_server_socket_state_t state;
     int32_t last_error;             // Last error that occurred on socket
+#define MIN_GC_TIMEOUT 30000
+#define DEFAULT_GC_TIMEOUT 120000
     ticks_t last_activity;        // Last activitiy on this socket for gc
     ticks_t time_opened;
 
@@ -101,8 +104,6 @@ prx_server_socket_t;
 DEFINE_HASHTABLE_INSERT(prx_server_add, io_ref_t, prx_server_socket_t);
 DEFINE_HASHTABLE_SEARCH(prx_server_get, io_ref_t, prx_server_socket_t);
 DEFINE_HASHTABLE_REMOVE(prx_server_remove, io_ref_t, prx_server_socket_t);
-
-#define DEFAULT_RESTRICTED_PORTS ""
 
 //
 // Websocket server transport (stream)
@@ -1376,6 +1377,8 @@ static int32_t prx_server_socket_handle_setoptrequest(
             break;
         }
 
+        server_sock->last_activity = ticks_get();
+
         /**/ if (message->content.setopt_request.so_val.type == prx_so_ip_multicast_join)
         {
             result = pal_socket_join_multicast_group(server_sock->sock,
@@ -1391,6 +1394,14 @@ static int32_t prx_server_socket_handle_setoptrequest(
             if (result != er_ok)
                 break;
             log_trace(server_sock->log, "Left multicast group...");
+        }
+        else if (message->content.setopt_request.so_val.type == prx_so_props_timeout)
+        {
+            server_sock->client_itf.props.timeout = (uint32_t)
+                message->content.setopt_request.so_val.property.value;
+            result = er_ok;
+            log_trace(server_sock->log, "Wrote socket gc timeout as %ull...",
+                message->content.getopt_response.so_val.property.value);
         }
         else if (message->content.setopt_request.so_val.type < __prx_so_max)
         {
@@ -1408,8 +1419,6 @@ static int32_t prx_server_socket_handle_setoptrequest(
             result = er_not_supported;
             break;
         }
- 
-        server_sock->last_activity = ticks_get();
     }
     while (0);
 
@@ -1461,11 +1470,19 @@ static int32_t prx_server_socket_handle_getoptrequest(
             break;
         }
 
+        server_sock->last_activity = ticks_get();
+
         /**/ if (so_opt == prx_so_ip_multicast_join ||
                  so_opt == prx_so_ip_multicast_leave)
         {
             result = er_not_supported;
             break;
+        }
+        else if (so_opt == prx_so_props_timeout)
+        {
+            message->content.getopt_response.so_val.property.value =
+                server_sock->client_itf.props.timeout;
+            result = er_ok;
         }
         else if (so_opt < __prx_so_max)
         {
@@ -1486,7 +1503,6 @@ static int32_t prx_server_socket_handle_getoptrequest(
         }
 
         message->content.getopt_response.so_val.type = so_opt;
-        server_sock->last_activity = ticks_get();
     }
     while (0);
 
@@ -1781,8 +1797,10 @@ static void prx_server_handle_linkrequest(
         // Create socket handle
         memcpy(&server_sock->client_itf.props, &message->content.link_request.props,
             sizeof(server_sock->client_itf.props));
-        if (server_sock->client_itf.props.timeout < 30000)
-            server_sock->client_itf.props.timeout = 30000;
+        if (!server_sock->client_itf.props.timeout)
+            server_sock->client_itf.props.timeout = DEFAULT_GC_TIMEOUT;
+        else if (server_sock->client_itf.props.timeout < MIN_GC_TIMEOUT)
+            server_sock->client_itf.props.timeout = MIN_GC_TIMEOUT;
 
         //
         // Create socket. If this is an internal socket open a socket pair with 

@@ -10,6 +10,7 @@ namespace Microsoft.Azure.Devices.Proxy {
     using System.Collections.Concurrent;
     using System.Threading;
     using System.Threading.Tasks;
+    using System.Threading.Tasks.Dataflow;
 
     /// <summary>
     /// Proxy socket implementation, core of System proxy socket and browse socket. 
@@ -36,118 +37,6 @@ namespace Microsoft.Azure.Devices.Proxy {
         /// </summary>
         public SocketInfo Info { get; private set; }
 
-
-
-
-
-        /// <summary>
-        /// Receive queue for all links
-        /// </summary>
-        public ConcurrentQueue<Message> ReceiveQueue { get; } = new ConcurrentQueue<Message>();
-
-        /// <summary>
-        /// Constructor - hidden, use Create to create a proxy socket object.
-        /// </summary>
-        /// <param name="info">Properties that the socket should have</param>
-        /// <param name="provider">The provider to use for communication, etc.</param>
-        protected ProxySocket(SocketInfo info, IProvider provider) {
-            Provider = provider;
-            Info = info;
-        }
-
-        /// <summary>
-        /// Create real proxy socket based on passed socket description. Creates
-        /// a specialized socket based on the protocol, e.g. tcp with sequential
-        /// stream or udp with packetized stream.
-        /// </summary>
-        /// <param name="info"></param>
-        /// <param name="provider"></param>
-        /// <returns></returns>
-        public static ProxySocket Create(SocketInfo info, IProvider provider) {
-            // Create specializations for tcp and udp
-            /**/ if (info.Protocol== ProtocolType.Tcp) {
-                return new TCPSocket(info, provider);
-            }
-            else if (info.Protocol == ProtocolType.Udp) {
-                return new UDPSocket(info, provider);
-            }
-            else {
-                throw new NotSupportedException("Only UDP and TCP supported right now.");
-            }
-        }
-
-
-
-
-
-        /// <summary>
-        /// Perform a link handshake with the passed proxies and populate streams
-        /// </summary>
-        /// <param name="proxies">The proxies (interfaces) to bind the link on</param>
-        /// <param name="address">Address to connect to, or null if passive</param>
-        /// <param name="ct">Cancels operation</param>
-        /// <returns></returns>
-        public async Task<bool> LinkAllAsync(IEnumerable<INameRecord> proxies, SocketAddress address, 
-            CancellationToken ct) {
-
-            // Complete socket info
-            Info.Address = address;
-
-            if (Info.Address == null) {
-                Info.Address = new NullSocketAddress();
-                Info.Flags |= (uint)SocketFlags.Passive;
-            }
-            Info.Options.UnionWith(_optionCache.Select(p => new Property<ulong>(
-                (uint)p.Key, p.Value)));
-
-            var tasks = new List<Task<IProxyLink>>();
-            foreach (var proxy in proxies) {
-                if (proxy == null)
-                    break;
-                tasks.Add(CreateLinkAsync(proxy, ct));
-            }
-            try {
-                var results = await Task.WhenAll(tasks.ToArray()).ConfigureAwait(false);
-                Links.AddRange(results.Where(v => v != null));
-                return results.Any();
-            }
-            catch (Exception ex) {
-                ProxyEventSource.Log.HandledExceptionAsInformation(this, ex);
-                // continue...
-            }
-            return false;
-        }
-
-        /// <summary>
-        /// Perform excatly one or zero link handshakes with one of the passed proxies 
-        /// and populate streams
-        /// </summary>
-        /// <param name="proxy">The proxy to bind the link on</param>
-        /// <param name="address">Address to connect to, or null if proxy bound</param>
-        /// <param name="ct">Cancels operation</param>
-        /// <returns></returns>
-        public async Task<bool> LinkAsync(INameRecord proxy, SocketAddress address, 
-            CancellationToken ct) {
-
-            // Complete socket info
-            Info.Address = address ?? new NullSocketAddress();
-            Info.Flags = address != null ? 0 : (uint)SocketFlags.Passive;
-            Info.Options.UnionWith(_optionCache.Select(p => new Property<ulong>(
-                (uint)p.Key, p.Value)));
-
-            try {
-                var link = await CreateLinkAsync(proxy, ct).ConfigureAwait(false);
-                if (link != null) {
-                    Links.Add(link);
-                    return true;
-                }
-            }
-            catch(Exception ex) {
-                ProxyEventSource.Log.HandledExceptionAsInformation(this, ex);
-                // continue...
-            }
-            return false;
-        }
 
         /// <summary>
         /// List of proxy links - i.e. open sockets or bound sockets on the remote
@@ -186,29 +75,143 @@ namespace Microsoft.Azure.Devices.Proxy {
             }
         }
 
-
-
-
-
         /// <summary>
-        /// Receives ping responses and handles them one by one through a handler 
-        /// callback.
+        /// Send block - broadcasting to all connected links
         /// </summary>
-        /// <param name="address"></param>
-        /// <param name="handler"></param>
-        /// <param name="last"></param>
-        /// <param name="ct"></param>
+        public IPropagatorBlock<Message, Message> SendBlock { get; } =
+            new BroadcastBlock<Message>(message => new Message(message));
+
+
+        /// <summary>
+        /// Receive block - connected to receive from all links
+        /// </summary>
+        public IPropagatorBlock<Message, Message> ReceiveBlock { get; } =
+            new TransformBlock<Message, Message>((message) => {
+                if (message.TypeId == MessageContent.Close) {
+                    // Remote side closed, close link
+                    return null;
+                    // todo:
+                }
+                else if (message.TypeId != MessageContent.Data) {
+                    return null;
+                }
+                return message;
+            });
+
+
+        /// <summary>
+        /// Constructor - hidden, use Create to create a proxy socket object.
+        /// </summary>
+        /// <param name="info">Properties that the socket should have</param>
+        /// <param name="provider">The provider to use for communication, etc.</param>
+        protected ProxySocket(SocketInfo info, IProvider provider) {
+            Provider = provider;
+            Info = info;
+        }
+
+        /// <summary>
+        /// Create real proxy socket based on passed socket description. Creates
+        /// a specialized socket based on the protocol, e.g. tcp with sequential
+        /// stream or udp with packetized stream.
+        /// </summary>
+        /// <param name="info"></param>
+        /// <param name="provider"></param>
         /// <returns></returns>
-        public Task PingAsync(SocketAddress address,
-            Func<Message, INameRecord, CancellationToken, Task<Disposition>> handler,
-            Action<Exception> last, CancellationToken ct) =>
-            Provider.ControlChannel.BroadcastAsync(new Message(
-                Id, Reference.Null, new PingRequest(address)), handler, last, ct);
+        public static ProxySocket Create(SocketInfo info, IProvider provider) {
+            // Create specializations for tcp and udp
+            /**/ if (info.Protocol == ProtocolType.Tcp) {
+                if (0 != (info.Flags & (uint)SocketFlags.Passive)) {
+                    return new TCPServerSocket(info, provider);
+                }
+                return new TCPClientSocket(info, provider);
+            }
+            else if (info.Protocol == ProtocolType.Udp) {
+                return new UDPSocket(info, provider);
+            }
+            else {
+                throw new NotSupportedException("Only UDP and TCP supported right now.");
+            }
+        }
+
+
+
+
+
 
 
 
         /// <summary>
-        /// Link one remote endpoint
+        /// Perform a link handshake with the passed proxies and populate streams
+        /// </summary>
+        /// <param name="proxies">The proxies (interfaces) to bind the link on</param>
+        /// <param name="address">Address to connect to, or null if passive</param>
+        /// <param name="ct">Cancels operation</param>
+        /// <returns></returns>
+        public async Task<bool> LinkAllAsync(IEnumerable<INameRecord> proxies, SocketAddress address, 
+            CancellationToken ct) {
+
+            // Complete socket info
+            Info.Address = address;
+
+            if (Info.Address == null) {
+                Info.Address = new NullSocketAddress();
+                Info.Flags |= (uint)SocketFlags.Passive;
+            }
+            Info.Options.UnionWith(_optionCache.Select(p => new Property<ulong>(
+                (uint)p.Key, p.Value)));
+
+            var tasks = new List<Task<IProxyLink>>();
+            foreach (var proxy in proxies) {
+                if (proxy == null)
+                    break;
+                tasks.Add(CreateLinkAsync(proxy, ct));
+            }
+            try {
+                var results = await Task.WhenAll(tasks.ToArray()).ConfigureAwait(false);
+                Links.AddRange(results.Where(v => v != null));
+
+                return results.Any();
+            }
+            catch (Exception ex) {
+                ProxyEventSource.Log.HandledExceptionAsInformation(this, ex);
+                // continue...
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Perform excatly one or zero link handshakes with one of the passed proxies 
+        /// and populate streams
+        /// </summary>
+        /// <param name="proxy">The proxy to bind the link on</param>
+        /// <param name="address">Address to connect to, or null if proxy bound</param>
+        /// <param name="ct">Cancels operation</param>
+        /// <returns></returns>
+        public async Task<bool> LinkOneAsync(INameRecord proxy, SocketAddress address, 
+            CancellationToken ct) {
+
+            // Complete socket info
+            Info.Address = address ?? new NullSocketAddress();
+            Info.Flags = address != null ? 0 : (uint)SocketFlags.Passive;
+            Info.Options.UnionWith(_optionCache.Select(p => new Property<ulong>(
+                (uint)p.Key, p.Value)));
+
+            try {
+                var link = await CreateLinkAsync(proxy, ct).ConfigureAwait(false);
+                if (link != null) {
+                    Links.Add(link);
+                    return true;
+                }
+            }
+            catch(Exception ex) {
+                ProxyEventSource.Log.HandledExceptionAsInformation(this, ex);
+                // continue...
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Create and open link to proxy
         /// </summary>
         /// <param name="proxy"></param>
         /// <param name="ct"></param>
@@ -247,6 +250,11 @@ namespace Microsoft.Azure.Devices.Proxy {
                 // Wait until remote side opens stream connection
                 bool success = await link.TryCompleteOpenAsync(ct).ConfigureAwait(false);
                 if (success) {
+
+                    // Link Send and receive blocks to the socket
+                    SendBlock.LinkTo(link.SendBlock);
+                    link.ReceiveBlock.LinkTo(ReceiveBlock);
+
                     ProxyEventSource.Log.LinkComplete(this, proxy.Name, Info.Address);
                     return link;
                 }
@@ -260,12 +268,112 @@ namespace Microsoft.Azure.Devices.Proxy {
         }
 
         /// <summary>
+        /// Close and release link
+        /// </summary>
+        /// <param name="link"></param>
+        /// <param name="ct"></param>
+        /// <returns></returns>
+        private async Task ReleaseLinkAsync(IProxyLink link, CancellationToken ct) {
+            if (Links.Remove(link)) {
+                await link.CloseAsync(ct);
+            }
+        }
+
+
+
+
+        //
+        // LookupBlock(SQL) => batches or records
+        // 
+        // InvokeMethodTransformBlock -> record + message
+        //
+        // BufferBlock - Receive response from 
+        //
+        // ReceiveAsync from BufferBlock - Once done cancel all
+        //
+
+        
+
+
+
+
+        /// <summary>
+        /// Select the proxy to bind to
+        /// </summary>
+        /// <param name="endpoint"></param>
+        /// <param name="ct"></param>
+        /// <returns></returns>
+        public virtual async Task BindAsync(SocketAddress endpoint, CancellationToken ct) {
+            // Proxy selected, look up name records for the proxy address
+
+            if (endpoint.Family == AddressFamily.Bound) {
+                // Unwrap bound address
+                endpoint = ((BoundSocketAddress)endpoint).LocalAddress;
+            }
+
+            IEnumerable<SocketAddress> addresses;
+            if (endpoint.Family == AddressFamily.Collection) {
+                // Unwrap collection
+                addresses = ((SocketAddressCollection) endpoint).Addresses();
+            }
+            else {
+                addresses = endpoint.AsEnumerable();
+            }
+
+            var bindList = new HashSet<INameRecord>();
+            foreach (var address in addresses) {
+                var result = await Provider.NameService.LookupAsync(
+                    address.ToString(), NameRecordType.Proxy, ct).ConfigureAwait(false);
+                bindList.AddRange(result);
+            }
+            if (!bindList.Any()) {
+                throw new SocketException(SocketError.NoAddress);
+            }
+            _bindList = bindList;
+        }
+
+        /// <summary>
+        /// Connect - only for tcp
+        /// </summary>
+        /// <param name="address"></param>
+        /// <param name="ct"></param>
+        /// <returns></returns>
+        public abstract Task ConnectAsync(SocketAddress address, CancellationToken ct);
+
+        /// <summary>
+        /// Listen - only for tcp
+        /// </summary>
+        /// <param name="backlog"></param>
+        /// <param name="ct"></param>
+        /// <returns></returns>
+        public abstract Task ListenAsync(int backlog, CancellationToken ct);
+
+        /// <summary>
+        /// Send buffer
+        /// </summary>
+        /// <param name="buffer"></param>
+        /// <param name="endpoint"></param>
+        /// <param name="ct"></param>
+        /// <returns></returns>
+        public abstract Task<int> SendAsync(ArraySegment<byte> buffer,
+            SocketAddress endpoint, CancellationToken ct);
+
+        /// <summary>
+        /// Receive buffer
+        /// </summary>
+        /// <param name="buffer"></param>
+        /// <param name="ct"></param>
+        /// <returns></returns>
+        public abstract Task<ProxyAsyncResult> ReceiveAsync(
+            ArraySegment<byte> buffer, CancellationToken ct);
+
+        /// <summary>
         /// Send socket option message to all streams
         /// </summary>
         /// <param name="option"></param>
         /// <param name="value"></param>
         /// <param name="ct"></param>
-        public async Task SetSocketOptionAsync(SocketOption option, ulong value, 
+        public async Task SetSocketOptionAsync(SocketOption option, ulong value,
             CancellationToken ct) {
             if (!Links.Any()) {
                 _optionCache[option] = value;
@@ -285,7 +393,7 @@ namespace Microsoft.Azure.Devices.Proxy {
         /// <param name="option"></param>
         /// <param name="ct"></param>
         /// <returns></returns>
-        public async Task<ulong> GetSocketOptionAsync(SocketOption option, 
+        public async Task<ulong> GetSocketOptionAsync(SocketOption option,
             CancellationToken ct) {
             if (!Links.Any()) {
                 return _optionCache.ContainsKey(option) ? _optionCache[option] : 0;
@@ -318,174 +426,24 @@ namespace Microsoft.Azure.Devices.Proxy {
         /// <param name="ct"></param>
         public virtual async Task CloseAsync(CancellationToken ct) {
             try {
-                await Task.WhenAll(Links.Select(i => i.CloseAsync(ct))).ConfigureAwait(false);
+                var links = Links.ToArray();
+                await Task.WhenAll(links.Select(i => ReleaseLinkAsync(i, 
+                    ct))).ConfigureAwait(false);
             }
             catch (Exception e) {
                 throw new SocketException(e);
             }
         }
 
-        protected IProxyStream _stream;
 
-        /// <summary>
-        /// Sends array of bytes on this socket
-        /// </summary>
-        /// <param name="buffer"></param>
-        /// <param name="endpoint"></param>
-        /// <param name="ct"></param>
-        /// <returns></returns>
-        public async Task<int> SendAsync(ArraySegment<byte> buffer, SocketAddress endpoint, 
-            CancellationToken ct) {
-            if (_stream == null)
-                throw new SocketException("Socket not ready for sending");
-            return await _stream.SendAsync(buffer, endpoint, ct).ConfigureAwait(false);
-        }
 
-        /// <summary>
-        /// Receives array of bytes on this socket
-        /// </summary>
-        /// <param name="buffer"></param>
-        /// <param name="ct"></param>
-        /// <returns></returns>
-        public async Task<ProxyAsyncResult> ReceiveAsync(ArraySegment<byte> buffer, 
-            CancellationToken ct) {
-            if (_stream == null)
-                throw new SocketException("Socket not ready for receiving");
-            return await _stream.ReceiveAsync(buffer, ct).ConfigureAwait(false);
-        }
 
-        /// <summary>
-        /// Receive from one of the contained streams
-        /// </summary>
-        /// <param name="ct"></param>
-        /// <returns></returns>
-        public async Task ReceiveAsync(CancellationToken ct) {
-            if (!Links.Any()) {
-                throw new SocketException(SocketError.Closed);
-            }
 
-            // Fill receive queue from any of the link's receive queue.  If queue is empty
-            // replenish it from all streams...
-            while (true) {
-                foreach (var link in Links) {
-                    Message message;
-                    var queue = link.ReceiveQueue;
-                    if (queue == null) {
-                        Links.Remove(link);
-                    }
-                    else {
-                        while (queue.TryDequeue(out message)) {
-                            if (message.TypeId == MessageContent.Close) {
-                                // Remote side closed, close link
-                                Links.Remove(link);
-                                try {
-                                    await link.CloseAsync(ct).ConfigureAwait(false);
-                                }
-                                catch { }
-                            }
-                            else {
-                                ReceiveQueue.Enqueue(message);
-                            }
-                        }
-                    }
-                    if (!Links.Any()) {
-                        throw new SocketException("Remote side closed",
-                            null, SocketError.Closed);
-                    }
 
-                }
-                if (ReceiveQueue.Any()) { 
-                    return;
-                }
-                else {
-                    try {
-                        var tasks = Links.Select(i => i.ReceiveAsync(ct));
-                        var selected = await Task.WhenAny(tasks).ConfigureAwait(false);
-                        await selected.ConfigureAwait(false); 
-                    }
-                    catch (OperationCanceledException) {
-                        throw;
-                    }
-                    catch(Exception e) {
-                        ct.ThrowIfCancellationRequested();
-                        throw new SocketException("Receive await failed",
-                            e, e.GetSocketError());
-                    }
-                }
-            }
-        }
 
-        /// <summary>
-        /// Send to all contained streams
-        /// </summary>
-        /// <param name="message"></param>
-        /// <param name="ct"></param>
-        /// <returns></returns>
-        public Task SendAsync(Message message, CancellationToken ct) {
-            if (!Links.Any()) {
-                throw new SocketException(SocketError.Closed);
-            }
-            try {
-                return Task.WhenAll(Links.Select(i => i.SendAsync(message, ct)));
-            }
-            catch (Exception e) {
-                throw new SocketException(e);
-            }
-        }
 
-        /// <summary>
-        /// Select the proxy to bind to
-        /// </summary>
-        /// <param name="endpoint"></param>
-        /// <param name="ct"></param>
-        /// <returns></returns>
-        public virtual async Task BindAsync(SocketAddress endpoint, CancellationToken ct) {
-            // Proxy selected, look up name records for the proxy address
 
-            if (endpoint.Family == AddressFamily.Bound) {
-                // Unwrap bound address
-                endpoint = ((BoundSocketAddress)endpoint).LocalAddress;
-            }
 
-            IEnumerable<SocketAddress> addresses;
-            if (endpoint.Family == AddressFamily.Collection) {
-                // Unwrap collection
-                addresses = ((SocketAddressCollection) endpoint).Addresses();
-            }
-            else {
-                addresses = endpoint.AsEnumerable();
-            }
-            var bindList = new HashSet<INameRecord>();
-            foreach (var address in addresses) {
-                var result = await Provider.NameService.LookupAsync(
-                    address.ToString(), NameRecordType.Proxy, ct).ConfigureAwait(false);
-                bindList.AddRange(result);
-            }
-            if (!bindList.Any()) {
-                throw new SocketException(SocketError.NoAddress);
-            }
-            _bindList = bindList;
-        }
-
-        /// <summary>
-        /// Connect - only for tcp
-        /// </summary>
-        /// <param name="address"></param>
-        /// <param name="ct"></param>
-        /// <returns></returns>
-        public virtual Task ConnectAsync(SocketAddress address, CancellationToken ct) {
-            throw new NotSupportedException("Cannot call connect on this socket");
-        }
-
-        /// <summary>
-        /// Listen - only for tcp
-        /// </summary>
-        /// <param name="backlog"></param>
-        /// <param name="ct"></param>
-        /// <returns></returns>
-        public virtual Task ListenAsync(int backlog, CancellationToken ct) {
-            throw new NotSupportedException("Cannot call listen on this socket");
-        }
 
         /// <summary>
         /// Returns a string that represents the socket.

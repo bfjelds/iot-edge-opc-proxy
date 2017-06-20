@@ -42,17 +42,4 @@ namespace Microsoft.Azure.Devices.Proxy {
             base(message, inner) {
         }
     }
-
-
-    public class ProxyNotFoundException : ProxyException {
-
-        public ProxyNotFoundException() : 
-            this(null) {
-        }
-
-        public ProxyNotFoundException(Exception innerException) :
-            base("Proxy not found", innerException) {
-        }
-    }
-
 }

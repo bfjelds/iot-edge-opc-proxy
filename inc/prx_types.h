@@ -434,7 +434,7 @@ typedef struct prx_socket_properties
     prx_socket_type_t sock_type;
     prx_protocol_type_t proto_type;
     uint32_t flags;                       // prx_socket_flags_t
-    uint32_t timeout;    // Timeout of socket after which to gc
+    uint64_t timeout;    // Timeout of socket after which to gc
     prx_socket_address_t address;      // address of the socket 
     prx_property_t options[__prx_so_max]; 
                                     // options to apply on open

@@ -10,10 +10,10 @@ namespace System.Threading.Tasks {
     /// <summary>
     /// Ref counted completion action 
     /// </summary>
-    public class CompletionAction {
+    public class CompletionAction : IDisposable {
 
-        public CompletionAction(int initialCount, Action action) {
-            _counter = initialCount;
+        public CompletionAction(Action action) {
+            _counter = 1;
             _action = action;
         }
 
@@ -32,6 +32,11 @@ namespace System.Threading.Tasks {
         /// </summary>
         public void Begin() {
             Interlocked.Increment(ref _counter);
+        }
+
+
+        public void Dispose() {
+            End();
         }
 
         private int _counter;

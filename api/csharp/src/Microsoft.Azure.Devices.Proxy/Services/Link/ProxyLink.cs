@@ -131,8 +131,10 @@ namespace Microsoft.Azure.Devices.Proxy {
             SocketOption option, ulong value, CancellationToken ct) {
 
             var response = await _socket.Provider.ControlChannel.CallAsync(Proxy,
-                new Message(_socket.Id, RemoteId, new SetOptRequest(
-                    new Property<ulong>((uint)option, value))), ct).ConfigureAwait(false);
+                    new Message(_socket.Id, RemoteId, new SetOptRequest(
+                        new Property<ulong>((uint)option, value))), 
+                TimeSpan.MaxValue, ct).ConfigureAwait(false);
+
             ProxySocket.ThrowIfFailed(response);
         }
 
@@ -145,8 +147,10 @@ namespace Microsoft.Azure.Devices.Proxy {
         public async Task<ulong> GetSocketOptionAsync(
             SocketOption option, CancellationToken ct) {
             var response = await _socket.Provider.ControlChannel.CallAsync(Proxy,
-                new Message(_socket.Id, RemoteId, new GetOptRequest(
-                    option)), ct).ConfigureAwait(false);
+                    new Message(_socket.Id, RemoteId, new GetOptRequest(
+                        option)), 
+                TimeSpan.MaxValue, ct).ConfigureAwait(false);
+
             ProxySocket.ThrowIfFailed(response);
             var optionValue = ((GetOptResponse)response.Content).OptionValue as Property<ulong>;
             if (optionValue == null) {
@@ -189,6 +193,11 @@ namespace Microsoft.Azure.Devices.Proxy {
                 ProxyEventSource.Log.StreamClosing(this, null);
                 await SendBlock.SendAsync(new Message(_socket.Id, RemoteId, 
                     new CloseRequest()), ct).ConfigureAwait(false);
+                SendBlock.Complete();
+                ReceiveBlock.Complete();
+
+                await SendBlock.Completion.ConfigureAwait(false);
+                await ReceiveBlock.Completion.ConfigureAwait(false);
             }
             finally {
                 await connection.CloseAsync().ConfigureAwait(false);
@@ -204,7 +213,7 @@ namespace Microsoft.Azure.Devices.Proxy {
         private async Task UnlinkAsync(CancellationToken ct) {
             var response = await _socket.Provider.ControlChannel.CallAsync(Proxy,
                 new Message(_socket.Id, RemoteId, 
-                    new CloseRequest()), ct).ConfigureAwait(false);
+                    new CloseRequest()), TimeSpan.FromSeconds(10), ct).ConfigureAwait(false);
             ProxyEventSource.Log.ObjectDestroyed(this);
             if (response != null) {
                 SocketError errorCode = (SocketError)response.Error;

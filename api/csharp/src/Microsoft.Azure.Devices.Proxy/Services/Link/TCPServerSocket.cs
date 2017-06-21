@@ -5,8 +5,6 @@
 
 namespace Microsoft.Azure.Devices.Proxy {
     using System;
-    using System.Linq;
-    using System.Collections.Generic;
     using System.Threading;
     using System.Threading.Tasks;
 
@@ -22,33 +20,49 @@ namespace Microsoft.Azure.Devices.Proxy {
         /// <param name="provider"></param>
         internal TCPServerSocket(SocketInfo info, IProvider provider) :
             base(info, provider) {
-            if (info.Type != SocketType.Stream)
+
+            if (Info.Type != SocketType.Stream) {
                 throw new ArgumentException("Tcp only supports streams");
+            }
+
+            if (Info.Address == null) {
+                Info.Address = new AnySocketAddress();
+            }
+            Info.Flags |= (uint)SocketFlags.Passive;
         }
 
         /// <summary>
-        /// Start listening
+        /// Select the proxy to bind to
+        /// </summary>
+        /// <param name="endpoint"></param>
+        /// <param name="ct"></param>
+        /// <returns></returns>
+        public override Task BindAsync(SocketAddress endpoint, CancellationToken ct) {
+            if (_boundEndpoint != null) {
+                throw new SocketException(
+                    "Cannot double bind already bound socket. Use collection address.");
+            }
+            _boundEndpoint = endpoint ?? throw new ArgumentNullException(nameof(endpoint)); 
+
+            while (_boundEndpoint.Family == AddressFamily.Bound) {
+                // Unwrap bound address
+                _boundEndpoint = ((BoundSocketAddress)_boundEndpoint).LocalAddress;
+            }
+
+            return TaskEx.Completed;
+        }
+
+        /// <summary>
+        /// Start listening - creates connection
         /// </summary>
         /// <param name="backlog"></param>
         /// <param name="ct"></param>
         /// <returns></returns>
-        public override async Task ListenAsync(int backlog, CancellationToken ct) {
-            bool listening = false;
-
-            if (_bindList != null) {
-                listening = await LinkAllAsync(_bindList, null, ct).ConfigureAwait(false);
+        public override Task ListenAsync(int backlog, CancellationToken ct) {
+            if (_boundEndpoint == null) {
+                throw new SocketException("Must call bind before listen");
             }
-            else {
-                // Not bound, must be bound
-                throw new SocketException(SocketError.NotSupported);
-            }
-            // Check to see if listen completed
-            if (!listening) {
-                throw new SocketException(SocketError.NoHost);
-            }
-
-            // TODO:
-            throw new NotImplementedException();
+            return LinkAsync(_boundEndpoint, ct);
         }
 
         public override Task ConnectAsync(SocketAddress address,
@@ -65,5 +79,7 @@ namespace Microsoft.Azure.Devices.Proxy {
             CancellationToken ct) {
             throw new NotSupportedException("Cannot call receive on server socket");
         }
+
+        private SocketAddress _boundEndpoint;
     }
 }

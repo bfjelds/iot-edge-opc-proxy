@@ -55,6 +55,10 @@
     <PackageReference Include="System.Reflection.TypeExtensions" Version="4.3.0" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Reference Include="mscorlib" />
+  </ItemGroup>
+
   <PropertyGroup>
     <DefineConstants>$(DefineConstants);TRACE</DefineConstants>
   </PropertyGroup>

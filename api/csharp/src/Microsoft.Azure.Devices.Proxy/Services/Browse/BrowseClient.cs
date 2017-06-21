@@ -106,7 +106,7 @@ namespace Microsoft.Azure.Devices.Proxy {
             }
             protected override DnsServiceEntry Yield(BrowseResponse response) =>
                 new DnsServiceEntry {
-                    Address = response.Item as ProxySocketAddress,
+                    Address = new BoundSocketAddress(response.Interface, response.Item),
                     Service = new DnsServiceRecord(_service) {
                         Interface = response.Interface,
                         Removed = (response.Flags & BrowseResponse.Removed) != 0
@@ -128,7 +128,9 @@ namespace Microsoft.Azure.Devices.Proxy {
             }
             protected override DnsHostEntry Yield(BrowseResponse response) =>
                 new DnsHostEntry {
-                    AddressList = new SocketAddress[] { response.Item },
+                    AddressList = new SocketAddress[] {
+                        new BoundSocketAddress(response.Interface, response.Item)
+                    },
                     HostName = _host.Host,
                     Interface = response.Interface,
                     Aliases = response.Properties

@@ -5,6 +5,8 @@
 
 namespace Microsoft.Azure.Devices.Proxy {
     using System;
+    using System.Collections.Generic;
+    using System.Linq;
     using System.Threading;
     using System.Threading.Tasks;
     using System.Threading.Tasks.Dataflow;
@@ -18,26 +20,25 @@ namespace Microsoft.Azure.Devices.Proxy {
         /// <param name="provider"></param>
         internal UDPSocket(SocketInfo info, IProvider provider) :
             base(info, provider) {
-            if (info.Type != SocketType.Dgram) {
+
+            if (Info.Type != SocketType.Dgram) {
                 throw new ArgumentException("Udp only supports datagrams");
+            }
+
+            if (Info.Address == null) {
+                Info.Address = new AnySocketAddress();
             }
         }
 
         /// <summary>
-        /// Bind udp socket
+        /// Select the proxy to bind to
         /// </summary>
         /// <param name="endpoint"></param>
         /// <param name="ct"></param>
         /// <returns></returns>
-        public override async Task BindAsync(SocketAddress endpoint, CancellationToken ct) {
-            await base.BindAsync(endpoint, ct);
-            bool connected = await LinkAllAsync(_bindList, endpoint, ct);
-            if (!connected) {
-                throw new SocketException(
-                    "Could not link browse socket on proxy", SocketError.NoHost);
-            }
-        }
-
+        public override Task BindAsync(SocketAddress endpoint, CancellationToken ct) =>
+            LinkAsync(endpoint, ct);
+       
         /// <summary>
         /// Send buffer
         /// </summary>
@@ -85,6 +86,5 @@ namespace Microsoft.Azure.Devices.Proxy {
         public override Task ListenAsync(int backlog, CancellationToken ct) {
             throw new NotSupportedException("Cannot call listen on this socket");
         }
-
     }
 }

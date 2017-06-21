@@ -154,47 +154,66 @@ namespace Microsoft.Azure.Devices.Proxy {
             var linker = new ActionBlock<DataflowMessage<INameRecord>>(async (input) => {
                 var proxy = input.Arg;
                 ProxyEventSource.Log.LinkCreate(this, proxy.Name, Info.Address);
-                // Create link, i.e. perform bind, connect, listen, etc. on proxy
-                Message response = await Provider.ControlChannel.CallAsync(proxy,
-                    new Message(Id, Reference.Null, new LinkRequest {
-                        Properties = Info
-                    }), TimeSpan.MaxValue, ct);
-
-                var linkResponse = response?.Content as LinkResponse;
-                if (linkResponse == null || response.Error != (int)SocketError.Success) {
-                    ProxyEventSource.Log.LinkFailure(this, proxy.Name, Info, response, null);
-                    error.Push(input, new ProxyException((SocketError)response.Error));
-                    return;
-                }
-
-                // now create local link and open link for streaming
-                var link = new ProxyLink(this, proxy, linkResponse.LinkId,
-                    linkResponse.LocalAddress, linkResponse.PeerAddress);
                 try {
-                    // Broker connection string to proxy
-                    var openRequest = await link.BeginOpenAsync(ct).ConfigureAwait(false);
-                    ProxyEventSource.Log.LinkOpen(this, proxy.Name, Info.Address);
+                    // Create link, i.e. perform bind, connect, listen, etc. on proxy
+                    Message response = await Provider.ControlChannel.CallAsync(proxy,
+                        new Message(Id, Reference.Null, new LinkRequest {
+                            Properties = Info
+                        }), TimeSpan.MaxValue, ct);
 
-                    await Provider.ControlChannel.CallAsync(proxy, new Message(Id, linkResponse.LinkId,
-                        openRequest), TimeSpan.MaxValue, ct).ConfigureAwait(false);
+                    var linkResponse = response?.Content as LinkResponse;
+                    if (linkResponse == null || response.Error != (int)SocketError.Success) {
+                        ProxyEventSource.Log.LinkFailure(this, proxy.Name, Info, response, null);
+                        error.Push(input, new ProxyException((SocketError)response.Error));
+                        return;
+                    }
 
-                    // Wait until remote side opens stream connection
-                    bool success = await link.TryCompleteOpenAsync(ct).ConfigureAwait(false);
-                    if (success) {
+                    // now create local link and open link for streaming
+                    var link = new ProxyLink(this, proxy, linkResponse.LinkId,
+                        linkResponse.LocalAddress, linkResponse.PeerAddress);
+                    try {
+                        // Broker connection string to proxy
+                        var openRequest = await link.BeginOpenAsync(ct).ConfigureAwait(false);
+                        ProxyEventSource.Log.LinkOpen(this, proxy.Name, Info.Address);
 
-                        // Link Send and receive blocks to the socket
-                        SendBlock.LinkTo(link.SendBlock);
-                        link.ReceiveBlock.LinkTo(ReceiveBlock);
+                        await Provider.ControlChannel.CallAsync(proxy, new Message(Id, linkResponse.LinkId,
+                            openRequest), TimeSpan.MaxValue, ct).ConfigureAwait(false);
 
-                        ProxyEventSource.Log.LinkComplete(this, proxy.Name, Info.Address);
-                        output.Post(link);
+                        // Wait until remote side opens stream connection
+                        bool success = await link.TryCompleteOpenAsync(ct).ConfigureAwait(false);
+                        if (success) {
+
+                            // Link Send and receive blocks to the socket
+                            SendBlock.LinkTo(link.SendBlock);
+                            link.ReceiveBlock.LinkTo(ReceiveBlock);
+
+                            ProxyEventSource.Log.LinkComplete(this, proxy.Name, Info.Address);
+                            output.Post(link);
+                        }
+                    }
+                    catch (Exception e) {
+                        // Try to close remote side
+                        await link.CloseAsync(CancellationToken.None).ConfigureAwait(false);
+                        error.Push(input, e);
+                        ProxyEventSource.Log.LinkFailure(this, proxy.Name, Info.Address, null, e);
                     }
                 }
+                catch (ProxyNotFound pnf) {
+                    // The proxy was not reachable - try again later
+                    ProxyEventSource.Log.HandledExceptionAsInformation(this, pnf);
+                    error.Push(input, null);
+                    return;
+                }
+                catch (ProxyTimeout pte) {
+                    // The proxy request timed out - increase timeout...
+                    ProxyEventSource.Log.HandledExceptionAsInformation(this, pte);
+                    error.Push(input, pte);
+                    return;
+                }
                 catch (Exception e) {
-                    // Try to close remote side
-                    await link.CloseAsync(CancellationToken.None).ConfigureAwait(false);
-                    error.Push(input, e);
-                    ProxyEventSource.Log.LinkFailure(this, proxy.Name, Info.Address, null, e);
+                    ProxyEventSource.Log.HandledExceptionAsWarning(this, e);
+                    // Log as error and continue...
+                    return;
                 }
 
             }, new ExecutionDataflowBlockOptions {
@@ -298,7 +317,7 @@ namespace Microsoft.Azure.Devices.Proxy {
                 });
 
             var query = Provider.NameService.Lookup(input, _open.Token);
-            var linker = Linker(errors, false, _open.Token);
+            var linker = Linker(errors, true, _open.Token);
 
             // When first connected mark tcs as complete
             var connected = new ActionBlock<IProxyLink>(l => {
@@ -323,14 +342,15 @@ namespace Microsoft.Azure.Devices.Proxy {
             // these are then posted to the linker for linking.  When the first link is established
             // Connect returns successful, but proxy continues linking until disposed
             //
-            while (endpoint.Family == AddressFamily.Bound) {
-                // Unwrap bound address
-                endpoint = ((BoundSocketAddress)endpoint).LocalAddress;
-            }
             if (endpoint == null || endpoint is AnySocketAddress) {
                 query.Post(Provider.NameService.NewQuery(Reference.All, NameRecordType.Proxy));
             }
             else {
+                while (endpoint.Family == AddressFamily.Bound) {
+                    // Unwrap bound address
+                    endpoint = ((BoundSocketAddress)endpoint).LocalAddress;
+                }
+
                 if (endpoint.Family == AddressFamily.Collection) {
                     foreach (var item in ((SocketAddressCollection)endpoint).Addresses()) {
                         await query.SendAsync(Provider.NameService.NewQuery(

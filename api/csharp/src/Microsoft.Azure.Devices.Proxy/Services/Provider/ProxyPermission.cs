@@ -8,12 +8,16 @@ namespace Microsoft.Azure.Devices.Proxy {
 
     public class ProxyPermission : ProxyException {
 
-        public ProxyPermission() :
-            this(null) {
+        public ProxyPermission(string message) :
+            base(message, null, SocketError.Permission) {
         }
 
         public ProxyPermission(Exception innerException) :
-            base("Proxy access not authorized", innerException) {
+            base("Proxy access not authorized", innerException, SocketError.Permission) {
+        }
+
+        public ProxyPermission(AggregateException innerException) :
+            base("Proxy access not authorized", innerException, SocketError.Permission) {
         }
     }
 

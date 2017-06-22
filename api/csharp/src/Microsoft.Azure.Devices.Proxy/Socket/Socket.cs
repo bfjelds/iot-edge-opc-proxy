@@ -1423,6 +1423,7 @@ namespace Microsoft.Azure.Devices.Proxy {
                 catch { }
                 _cleanedUp = true;
             }
+            _internal.Dispose();
             _internal = null;
         }
 

@@ -195,7 +195,7 @@ namespace Microsoft.Azure.Devices.Proxy {
             AddressFamily family = (AddressFamily)
                 await reader.ReadInt32Async(ct).ConfigureAwait(false);
             if (family == AddressFamily.Unspecified) {
-                result = new NullSocketAddress();
+                result = new AnySocketAddress();
             }
             else if (family == AddressFamily.Unix) {
                 if (members < 2) {

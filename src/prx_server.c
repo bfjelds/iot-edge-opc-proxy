@@ -381,6 +381,7 @@ static void prx_server_worker(
     ticks_t now;
 
     dbg_assert_ptr(server);
+    dbg_assert_is_task(server->scheduler);
     now = ticks_get();
 
     // Schedule again in 5 seconds
@@ -397,7 +398,7 @@ static void prx_server_worker(
                 next = (prx_server_socket_t*)hashtable_iterator_value(itr);
                 dbg_assert_ptr(next);
                 if (next->last_activity == 0 ||
-                    (uint32_t)(now - next->last_activity) < next->client_itf.props.timeout)
+                    (uint64_t)(now - next->last_activity) < next->client_itf.props.timeout)
                     timedout = false;
                 else
                     timedout = true;  // State timed out
@@ -1273,11 +1274,14 @@ static int32_t prx_server_socket_handle_pollrequest(
     if (result == er_ok)
     {
         now = ticks_get();
-        // Reset socket timeout every poll request since we are slower than socket
+        timeout = message->content.poll_message.timeout;
+
+        // Reset activity timer and prolong socket gc to make a multiple 
+        // of the timeout.
+        server_sock->client_itf.props.timeout = (((uint32_t)timeout) * 3);
         server_sock->last_activity = now;
 
-        timeout = message->content.poll_message.timeout;
-        // Make absolute timeout so we can gc poll requests
+        // Make absolute timeout so we can gc this poll request
         message->content.poll_message.timeout = now + timeout;
         DList_InsertTailList(&server_sock->read_queue, &message->link);
         
@@ -1286,7 +1290,6 @@ static int32_t prx_server_socket_handle_pollrequest(
 
         if (!DList_IsListEmpty(&server_sock->read_queue))
         {
-
             // ... if still poll requests left, flow on and wait
             pal_socket_can_recv(server_sock->sock, true);
 
@@ -1397,7 +1400,7 @@ static int32_t prx_server_socket_handle_setoptrequest(
         }
         else if (message->content.setopt_request.so_val.type == prx_so_props_timeout)
         {
-            server_sock->client_itf.props.timeout = (uint32_t)
+            server_sock->client_itf.props.timeout = 
                 message->content.setopt_request.so_val.property.value;
             result = er_ok;
             log_trace(server_sock->log, "Wrote socket gc timeout as %ull...",

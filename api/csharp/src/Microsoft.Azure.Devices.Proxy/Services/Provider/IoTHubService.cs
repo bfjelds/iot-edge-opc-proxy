@@ -43,120 +43,118 @@ namespace Microsoft.Azure.Devices.Proxy.Provider {
         #region INameService
 
         /// <summary>
-        /// The update target block exposed by the name service.
+        /// Internal query implementation - caches a record if found in local cache
         /// </summary>
-        public ITargetBlock<Tuple<INameRecord, bool>> Update { get; private set; }
+        struct IoTHubNameServiceQuery : IQuery {
+            public string sql;
+            public INameRecord cached;
+
+            public override String ToString() => sql != null ? sql : cached.ToString();
+        }
 
         /// <summary>
-        /// Initializes the update target.  If the tuple item 2 is false removes 
-        /// a record from cache and registry and invalidates results cache. If 
-        /// true, registers a new record with device registry.  Host records are 
-        /// synchronized lazily at every cache refresh to avoid spamming the 
-        /// registry...
+        /// Create new IoTHubNameServiceQuery based on name and type
         /// </summary>
-        private void InitUpdateBlock() {
-            Update = new ActionBlock<Tuple<INameRecord, bool>>(async (tup) => {
-                if (tup.Item2) {
-                    if (NameRecordType.Host == (tup.Item1.Type & NameRecordType.Host)) {
-                        _cache.AddOrUpdate(tup.Item1.Id, s => tup.Item1, (s, r) => r.Assign(tup.Item1));
-                        return;
+        /// <param name="name"></param>
+        /// <param name="type"></param>
+        /// <returns></returns>
+        public IQuery NewQuery(String name, NameRecordType type) {
+            if (string.IsNullOrEmpty(name)) {
+                throw new ArgumentException(nameof(name));
+            }
+            name = name.ToLowerInvariant();
+
+            // Lookup cached record here for efficiency
+            if (NameRecordType.Host == (type & NameRecordType.Host)) {
+                // Use cache to look up a host record
+                if (_cache.TryGetValue(name, out INameRecord record) && record.References.Any()) {
+                    return new IoTHubNameServiceQuery { cached = record };
+                }
+            }
+
+            var sql = new StringBuilder("SELECT * FROM devices WHERE ");
+            sql.Append("(deviceId = '");
+            sql.Append(name);
+
+            if (NameRecordType.Proxy == (type & NameRecordType.Proxy)) {
+                sql.Append("' OR tags.name = '");
+                sql.Append(name);
+            }
+
+            if (Reference.TryParse(name, out Reference address)) {
+                sql.Append("' OR tags.address = '");
+                sql.Append(address.ToString().ToLower());
+            }
+
+            sql.Append("') AND ");
+            sql.Append(IoTHubRecord.CreateTypeQueryString(type));
+            return new IoTHubNameServiceQuery { sql = sql.ToString() };
+        }
+
+        /// <summary>
+        /// Create new query based on address
+        /// </summary>
+        /// <param name="address"></param>
+        /// <param name="type"></param>
+        /// <returns></returns>
+        public IQuery NewQuery(Reference address, NameRecordType type) {
+            if (address == null || address == Reference.Null) {
+                throw new ArgumentException(nameof(address));
+            }
+            var sql = new StringBuilder("SELECT * FROM devices WHERE ");
+            if (address != Reference.All) {
+                sql.Append("tags.address = '");
+                sql.Append(address.ToString().ToLower());
+                sql.Append("' AND ");
+            }
+            sql.Append(IoTHubRecord.CreateTypeQueryString(type));
+            return new IoTHubNameServiceQuery { sql = sql.ToString() };
+        }
+
+        /// <summary>
+        /// Returns a lookup block that allows passing queries to
+        /// </summary>
+        /// <param name="results"></param>
+        /// <param name="ct"></param>
+        /// <returns></returns>
+        public IPropagatorBlock<IQuery, INameRecord> Lookup(ExecutionDataflowBlockOptions options) {
+            if (options == null) {
+                throw new ArgumentNullException(nameof(options));
+            }
+            var ct = options.CancellationToken;
+            if (ct == null) {
+                throw new ArgumentNullException(nameof(ct));
+            }
+
+            var results = new BufferBlock<INameRecord>(options);
+            //
+            // Create a completion action to complete the results when 
+            // all queries complete, i.e. no more results will be pending.
+            //
+            var ca = new CompletionAction(() => results.Complete());
+            var lookup = new ActionBlock<IQuery>(async input => {
+                var query = (IoTHubNameServiceQuery)input;
+                ca.Begin();
+                try {
+                    if (query.cached != null) {
+                        await results.SendAsync(query.cached);
                     }
                     else {
-                        await UpdateRecordAsync(tup.Item1, _close.Token);
+                        await LookupAsync(query.sql, results, ct);
                     }
                 }
-                else {
-                    _cache.TryRemove(tup.Item1.Id, out INameRecord record);
-                    await RemoveRecordAsync(record, _close.Token);
+                finally {
+                    ca.End();
                 }
-                base.Invalidate();
-            }, 
-            new ExecutionDataflowBlockOptions { CancellationToken = _close.Token });
-        }
+            }, options);
 
-        /// <summary>
-        /// Returns a by name query target
-        /// </summary>
-        /// <param name="results"></param>
-        /// <param name="ct"></param>
-        /// <returns></returns>
-        public ITargetBlock<Tuple<string, NameRecordType>> ByName(ITargetBlock<INameRecord> results, 
-            CancellationToken ct) {
-            var ca = new CompletionAction(1, () => results.Complete());
-            var query = new ActionBlock<Tuple<string, NameRecordType>>(async t => {
-                ca.Begin();
-                var name = t.Item1;
-                var type = t.Item2;
-
-                if (string.IsNullOrEmpty(name)) {
-                    throw new ArgumentException(nameof(name));
+            lookup.Completion.ContinueWith(t => {
+                if (t.IsFaulted) {
+                    ((IDataflowBlock)results).Fault(t.Exception);
                 }
-
-                name = name.ToLowerInvariant();
-                if (NameRecordType.Host == (type & NameRecordType.Host)) {
-                    // Use cache to look up a host record
-                    INameRecord record;
-                    if (_cache.TryGetValue(name, out record) && record.References.Any()) {
-                        await results.SendAsync(record);
-                        results.Complete();
-                        return;
-                    }
-                }
-
-                var sql = new StringBuilder("SELECT * FROM devices WHERE ");
-                sql.Append("(deviceId = '");
-                sql.Append(name);
-
-                if (NameRecordType.Proxy == (type & NameRecordType.Proxy)) {
-                    sql.Append("' OR tags.name = '");
-                    sql.Append(name);
-                }
-
-                if (Reference.TryParse(name, out Reference address)) {
-                    sql.Append("' OR tags.address = '");
-                    sql.Append(address.ToString().ToLower());
-                }
-
-                sql.Append("') AND ");
-                sql.Append(IoTHubRecord.CreateTypeQueryString(type));
-
-                await LookupAsync(sql.ToString(), results, ct);
-                ca.End();
-            },
-            new ExecutionDataflowBlockOptions { CancellationToken = ct });
-            query.Completion.ContinueWith(_ => ca.End());
-            return query;
-        }
-
-        /// <summary>
-        /// Returns a by address query target
-        /// </summary>
-        /// <param name="results"></param>
-        /// <param name="ct"></param>
-        /// <returns></returns>
-        public ITargetBlock<Tuple<Reference, NameRecordType>> ByAddress(ITargetBlock<INameRecord> results,
-            CancellationToken ct) {
-            var ca = new CompletionAction(1, () => results.Complete());
-            var query = new ActionBlock<Tuple<Reference, NameRecordType>>(async (t) => {
-                ca.Begin();
-                var address = t.Item1;
-                var type = t.Item2;
-                if (address == null || address == Reference.Null) {
-                    throw new ArgumentException(nameof(address));
-                }
-                var sql = new StringBuilder("SELECT * FROM devices WHERE ");
-                if (address != Reference.All) {
-                    sql.Append("tags.address = '");
-                    sql.Append(address.ToString().ToLower());
-                    sql.Append("' AND ");
-                }
-                sql.Append(IoTHubRecord.CreateTypeQueryString(type));
-                await LookupAsync(sql.ToString(), results, ct);
-                ca.End();
-            },
-            new ExecutionDataflowBlockOptions { CancellationToken = ct });
-            query.Completion.ContinueWith(_ => ca.End());
-            return query;
+                ca.Dispose();
+            });
+            return DataflowBlock.Encapsulate(lookup, results);
         }
 
         /// <summary>
@@ -167,7 +165,6 @@ namespace Microsoft.Azure.Devices.Proxy.Provider {
         /// <returns></returns>
         internal async Task LookupAsync(string sql, ITargetBlock<INameRecord> target, 
             CancellationToken ct) {
-
             string continuation = null;
             do {
                 var response = await PagedLookupAsync(sql, continuation, ct).ConfigureAwait(false);
@@ -177,7 +174,6 @@ namespace Microsoft.Azure.Devices.Proxy.Provider {
                 continuation = response.Item1;
             }
             while (!string.IsNullOrEmpty(continuation) && !ct.IsCancellationRequested);
-            target.Complete();
         }
 
         /// <summary>
@@ -265,6 +261,39 @@ namespace Microsoft.Azure.Devices.Proxy.Provider {
             catch (Exception e) {
                 throw ProxyEventSource.Log.Rethrow(e, this);
             }
+        }
+
+
+        /// <summary>
+        /// The update target block exposed by the name service.
+        /// </summary>
+        public ITargetBlock<Tuple<INameRecord, bool>> Update { get; private set; }
+
+        /// <summary>
+        /// Initializes the update target.  If the tuple item 2 is false removes 
+        /// a record from cache and registry and invalidates results cache. If 
+        /// true, registers a new record with device registry.  Host records are 
+        /// synchronized lazily at every cache refresh to avoid spamming the 
+        /// registry...
+        /// </summary>
+        private void InitUpdateBlock() {
+            Update = new ActionBlock<Tuple<INameRecord, bool>>(async (tup) => {
+                if (tup.Item2) {
+                    if (NameRecordType.Host == (tup.Item1.Type & NameRecordType.Host)) {
+                        _cache.AddOrUpdate(tup.Item1.Id, s => tup.Item1, (s, r) => r.Assign(tup.Item1));
+                        return;
+                    }
+                    else {
+                        await UpdateRecordAsync(tup.Item1, _close.Token);
+                    }
+                }
+                else {
+                    _cache.TryRemove(tup.Item1.Id, out INameRecord record);
+                    await RemoveRecordAsync(record, _close.Token);
+                }
+                base.Invalidate();
+            },
+            new ExecutionDataflowBlockOptions { CancellationToken = _close.Token });
         }
 
         /// <summary>
@@ -522,130 +551,16 @@ namespace Microsoft.Azure.Devices.Proxy.Provider {
         /// <param name="ct"></param>
         /// <returns></returns>
         public async Task<Message> CallAsync(INameRecord proxy, Message request,
-            CancellationToken ct) {
+            TimeSpan timeout, CancellationToken ct) {
             try {
-                return await InvokeDeviceMethodAsync(proxy, request, TimeSpan.FromMinutes(3),
+                return await InvokeDeviceMethodAsync(proxy, request, timeout,
                     ct).ConfigureAwait(false);
             }
-            catch (OperationCanceledException) {
-            }
-            catch (Exception e) {
-                ProxyEventSource.Log.HandledExceptionAsError(this, e);
+            catch (Exception) {
+                // Was logged before do not log again.
             }
             return null;
         }
-
-        // TODO: REMOVE
-        /// <summary>
-        /// Broadcast to all proxies
-        /// </summary>
-        /// <param name="message"></param>
-        /// <param name="handler"></param>
-        /// <param name="last"></param>
-        /// <param name="ct"></param>
-        /// <returns></returns>
-        public async Task BroadcastAsync(Message message,
-            Func<Message, INameRecord, CancellationToken, Task<Disposition>> handler,
-            Action<Exception> last, CancellationToken ct) {
-
-            var cts = new CancellationTokenSource();
-            ct.Register(() => {
-                cts.Cancel();
-            });
-
-            try {
-                string sql = "SELECT * FROM devices WHERE tags.proxy=1";
-                var results = await LookupAsync(sql, ct).ConfigureAwait(false);
-                var proxyList = new List<INameRecord>(results);
-                if (!proxyList.Any()) {
-                    ProxyEventSource.Log.NoProxyInstalled(this);
-                }
-
-                for (int attempts = 1; !ct.IsCancellationRequested && proxyList.Any(); attempts++) {
-                    var tasks = new Dictionary<Task<Message>, INameRecord>();
-
-                    proxyList.Shuffle();
-                    foreach (var proxy in proxyList) {
-                        // 3 second initial timeout on method call here to keep broadcasts moving
-                        // We retry all failed invocations if none responds within 3 seconds
-                        tasks.Add(TryInvokeDeviceMethodAsync(proxy, message,
-                            TimeSpan.FromSeconds(3 * attempts), cts.Token), proxy);
-                    }
-                    proxyList.Clear();
-
-                    while (!ct.IsCancellationRequested && tasks.Any()) {
-                        // Now link one by one
-                        var method = await Task.WhenAny(tasks.Keys).ConfigureAwait(false);
-                        var record = tasks[method];
-                        tasks.Remove(method);
-                        if (method.IsFaulted) {
-                            proxyList.Add(record);
-                            continue;
-                        }
-                        var response = await method;
-                        if (response == null) {
-                            proxyList.Add(record);
-                            continue;
-                        }
-                        var disp = await handler(response, record, ct).ConfigureAwait(false);
-                        /**/ if (disp == Disposition.Done) {
-                            return;
-                        }
-                        else if (disp == Disposition.Retry) {
-                            proxyList.Add(record);
-                        }
-                    }
-
-                    ProxyEventSource.Log.BroadcastRetry(this, attempts, proxyList.Count);
-                    if (!proxyList.Any()) {
-                        break;
-                    }
-                }
-                if (!ct.IsCancellationRequested) {
-                    last(null);
-                }
-            }
-            catch (OperationCanceledException) {
-            }
-            catch (Exception e) {
-                if (!ct.IsCancellationRequested) {
-                    last(e);
-                    throw ProxyEventSource.Log.Rethrow(e, this);
-                }
-            }
-            finally {
-                try {
-                    cts.Cancel(); // Cancel the remaining tasks...
-                }
-                catch (Exception ex) {
-                    ProxyEventSource.Log.HandledExceptionAsInformation(this, ex);
-                }
-            }
-        }
-
-
-        // TODO: REMOVE
-        /// <summary>
-        /// Lookup records by name
-        /// </summary>
-        /// <param name="name"></param>
-        /// <param name="type"></param>
-        /// <param name="ct"></param>
-        /// <returns></returns>
-        public async Task<IEnumerable<INameRecord>> LookupAsync(string sql,
-            CancellationToken ct) {
-            string continuation = null;
-            var result = new List<INameRecord>();
-            do {
-                var response = await PagedLookupAsync(sql, continuation, ct).ConfigureAwait(false);
-                continuation = response.Item1;
-                result.AddRange(response.Item2);
-            }
-            while (!string.IsNullOrEmpty(continuation) && !ct.IsCancellationRequested);
-            return result;
-        }
-
-
 
         /// <summary>
         /// Envelope for message call
@@ -676,10 +591,12 @@ namespace Microsoft.Azure.Devices.Proxy.Provider {
             /// <param name="message"></param>
             /// <param name="responseTimeout"></param>
             public MethodCallRequest(Message message, TimeSpan responseTimeout) {
-                if (responseTimeout > TimeSpan.FromMinutes(5))
-                    responseTimeout = TimeSpan.FromMinutes(5); // Max value for iothub is 5 minutes
-                else if (responseTimeout < TimeSpan.FromSeconds(5))
-                    responseTimeout = TimeSpan.FromSeconds(5);
+                if (responseTimeout > _maxTimeout) {
+                    responseTimeout = _maxTimeout;
+                }
+                else if (responseTimeout < _minTimeout) {
+                    responseTimeout = _minTimeout;
+                }
                 this.ResponseTimeoutInSeconds = (int)responseTimeout.TotalSeconds;
                 this.Payload = message;
             }
@@ -701,6 +618,10 @@ namespace Microsoft.Azure.Devices.Proxy.Provider {
                 MixToHash(ResponseTimeoutInSeconds);
                 MixToHash(Payload);
             }
+
+            // Max value for iothub is 5 minutes
+            private static readonly TimeSpan _maxTimeout = TimeSpan.FromMinutes(5);
+            private static readonly TimeSpan _minTimeout = TimeSpan.FromSeconds(5);
         }
 
         /// <summary>

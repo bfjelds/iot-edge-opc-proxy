@@ -165,7 +165,7 @@ namespace Microsoft.Azure.Devices.Proxy {
                 AddressFamily family = (AddressFamily)jsonObject.Value<int>("family");
                 switch(family) {
                     case AddressFamily.Unspecified:
-                        return new NullSocketAddress();
+                        return new AnySocketAddress();
                     case AddressFamily.Unix:
                         return jsonObject.ToObject<UnixSocketAddress>();
                     case AddressFamily.Proxy:

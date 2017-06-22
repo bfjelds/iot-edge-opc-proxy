@@ -32,23 +32,30 @@ namespace Microsoft.Azure.Devices.Proxy {
                 throw new ArgumentException("Tcp only supports streams");
         }
 
-
-        /// <summary>
-        /// Receives ping responses and handles them one by one through a handler 
-        /// callback.
-        /// </summary>
-        /// <param name="address"></param>
-        /// <param name="handler"></param>
-        /// <param name="last"></param>
-        /// <param name="ct"></param>
-        /// <returns></returns>
-        public async Task PingAsync(SocketAddress address,
-            Func<Message, INameRecord, CancellationToken, Task<Disposition>> handler,
-            Action<Exception> last, CancellationToken ct) {
-            await Provider.ControlChannel.BroadcastAsync(new Message(
-                Id, Reference.Null, new PingRequest(address)), handler, last, ct);
+        public override Task ListenAsync(int backlog, CancellationToken ct) {
+            throw new NotSupportedException("Cannot call listen on client socket!");
         }
 
+        /// <summary>
+        /// Select the proxy to bind to
+        /// </summary>
+        /// <param name="endpoint"></param>
+        /// <param name="ct"></param>
+        /// <returns></returns>
+        public override Task BindAsync(SocketAddress endpoint, CancellationToken ct) {
+            if (_boundEndpoint != null) {
+                throw new SocketException(
+                    "Cannot double bind already bound socket. Use collection address.");
+            }
+            _boundEndpoint = endpoint ?? throw new ArgumentNullException(nameof(endpoint));
+
+            while (_boundEndpoint.Family == AddressFamily.Bound) {
+                // Unwrap bound address
+                _boundEndpoint = ((BoundSocketAddress)_boundEndpoint).LocalAddress;
+            }
+
+            return TaskEx.Completed;
+        }
 
         /// <summary>
         /// Connect to a target on first of bound proxies, or use ping based dynamic lookup
@@ -57,126 +64,137 @@ namespace Microsoft.Azure.Devices.Proxy {
         /// <param name="ct"></param>
         /// <returns></returns>
         public override async Task ConnectAsync(SocketAddress address, CancellationToken ct) {
-
-            if (address.Family == AddressFamily.Bound) {
+            //
+            // The address is a combination of proxy binding and remote address.  This is 
+            // the case for all addresses returned by Dns resolution.  If no address was 
+            // previously bound - use the one provided here.
+            //
+            Info.Address = address;
+            if (Info.Address.Family == AddressFamily.Bound) {
                 // Unwrap proxy and connect address.  If not bound, use local address to bind to.
-                if (_bindList == null) {
-                    await BindAsync(((BoundSocketAddress)address).LocalAddress, ct);
+                if (_boundEndpoint == null) {
+                    _boundEndpoint = address;
+                    // Unwrap bound address
+                    while (_boundEndpoint.Family == AddressFamily.Bound) {
+                        _boundEndpoint = ((BoundSocketAddress)_boundEndpoint).LocalAddress;
+                    }
                 }
-                address = ((BoundSocketAddress) address).RemoteAddress;
+                Info.Address = ((BoundSocketAddress)Info.Address).RemoteAddress;
             }
 
+            //
             // Get the named host from the registry if it exists - there should only be one...
-            Host = null;
+            // This is the host we shall connect to.  It can contain proxies to use as well.
+            //
             var hostList = await Provider.NameService.LookupAsync(
-                address.ToString(), NameRecordType.Host, ct).ConfigureAwait(false);
-            foreach (var host in hostList) {
-                Host = host;
-                break;
-            }
-
-            // If there is no host in the registry, create a fake host record for this address
+                Info.Address.ToString(), NameRecordType.Host, ct).ConfigureAwait(false);
+            Host = hostList.FirstOrDefault();
             if (Host == null) {
-                Host = new NameRecord(NameRecordType.Host, address.ToString());
+                // If there is no host in the registry, create a fake host record for this address
+                Host = new NameRecord(NameRecordType.Host, Info.Address.ToString());
             }
-            else if (!Host.Name.Equals(address.ToString(), StringComparison.CurrentCultureIgnoreCase)) {
+            else if (!Host.Name.Equals(Info.Address.ToString(), StringComparison.CurrentCultureIgnoreCase)) {
                 // Translate the address to host address
-                address = new ProxySocketAddress(Host.Name);
+                Info.Address = new ProxySocketAddress(Host.Name);
             }
 
-            // Set bind list before connecting if it is not already set during Bind
-            bool autoBind = _bindList == null;
-            if (autoBind) {
-                var bindList = new HashSet<INameRecord>();
-                foreach (var proxyRef in Host.References) {
-                    var results = await Provider.NameService.LookupAsync(
-                        proxyRef, NameRecordType.Proxy, ct).ConfigureAwait(false);
-                    bindList.AddRange(results);
-                }
-                _bindList = bindList.Any() ? bindList : null;
-            }
+            // Commit all options that were set until now into info
+            Info.Options.UnionWith(_optionCache.Select(p => new Property<ulong>(
+                (uint)p.Key, p.Value)));
 
-            bool connected = false;
-            if (_bindList != null) {
-                // Try to connect through each proxy in the bind list
-                foreach (var proxy in _bindList) {
-                    connected = await ConnectAsync(address, proxy, ct).ConfigureAwait(false);
-                    if (connected) {
-                        break;
+            //
+            // Create tpl network for connect - prioritize input above errored attempts using
+            // prioritized scheduling queue.
+            //
+            var input = DataflowMessage<INameRecord>.CreateAdapter(new ExecutionDataflowBlockOptions {
+                CancellationToken = ct,
+                MaxDegreeOfParallelism = DataflowBlockOptions.Unbounded,
+                MaxMessagesPerTask = DataflowBlockOptions.Unbounded,
+                TaskScheduler = QueuedTaskScheduler.Priority[127]
+            });
+
+            var errors = new TransformBlock<DataflowMessage<INameRecord>, DataflowMessage<INameRecord>>(
+            async (error) => {
+                Console.WriteLine($"Error connecting to {Host}");
+                Host.RemoveReference(error.Arg.Address);
+                await Provider.NameService.Update.SendAsync(Tuple.Create(Host, true), ct);
+                return error;
+            },
+            new ExecutionDataflowBlockOptions {
+                CancellationToken = ct,
+                MaxDegreeOfParallelism = DataflowBlockOptions.Unbounded,
+                MaxMessagesPerTask = DataflowBlockOptions.Unbounded,
+                TaskScheduler = QueuedTaskScheduler.Priority[255]
+            });
+
+            var query = Provider.NameService.Lookup(new ExecutionDataflowBlockOptions {
+                CancellationToken = ct,
+                MaxDegreeOfParallelism = DataflowBlockOptions.Unbounded,
+                MaxMessagesPerTask = DataflowBlockOptions.Unbounded,
+                TaskScheduler = QueuedTaskScheduler.Priority[127]
+            });
+
+            var pinger = CreatePingBlock(errors, Info.Address, new ExecutionDataflowBlockOptions {
+                CancellationToken = ct,
+                MaxDegreeOfParallelism = DataflowBlockOptions.Unbounded,
+                MaxMessagesPerTask = 1,
+                TaskScheduler = QueuedTaskScheduler.Priority[127]
+            });
+
+            var linker = CreateLinkBlock(errors, new ExecutionDataflowBlockOptions {
+                CancellationToken = ct,
+                MaxDegreeOfParallelism = 1, // Ensure one link is created at a time.
+                MaxMessagesPerTask = DataflowBlockOptions.Unbounded,
+                TaskScheduler = QueuedTaskScheduler.Priority[127]
+            });
+
+            var connection = new WriteOnceBlock<IProxyLink>(l => l, new DataflowBlockOptions {
+                MaxMessagesPerTask = 1, // Auto complete when loink is created
+                TaskScheduler = QueuedTaskScheduler.Priority[127]
+            });
+
+            query.ConnectTo(input);
+            input.ConnectTo(pinger);
+            errors.ConnectTo(pinger);
+            pinger.ConnectTo(linker);
+            linker.ConnectTo(connection);
+
+            // Now post proxies to the lookup block - start by sending all bound addresses
+            var queries = new List<Task<bool>>();
+            if (_boundEndpoint != null) {
+                // Todo - consider removing ping and try link only here...
+
+                if (_boundEndpoint.Family == AddressFamily.Collection) {
+                    foreach (var item in ((SocketAddressCollection)_boundEndpoint).Addresses()) {
+                        queries.Add(query.SendAsync(Provider.NameService.NewQuery(
+                            item.ToString(), NameRecordType.Proxy), ct));
                     }
                 }
-                // If there was a bind list and we could not connect through it, throw
-                if (!connected && !autoBind) {
-                    throw new SocketException(SocketError.NoHost);
+                else {
+                    queries.Add(query.SendAsync(Provider.NameService.NewQuery(
+                        _boundEndpoint.ToString(), NameRecordType.Proxy), ct));
                 }
-                _bindList = null;
-            }
-
-            if (!connected) {
-                await PingAsync(address, async (response, proxy, ct2) => {
-                    if (connected) {
-                        return Disposition.Done;
-                    }
-                    if (response.Error == (int)SocketError.Success) {
-                        try {
-                            connected = await ConnectAsync(address, proxy, ct).ConfigureAwait(false); 
-                        }
-                        catch (Exception) {
-                            return Disposition.Retry;
-                        }
-                    }
-                    return connected ? Disposition.Done : Disposition.Continue; 
-                }, (ex) => {
-                    if (!connected) {
-                        throw new SocketException(
-                            "Could not link socket on proxy", ex, SocketError.NoHost);
-                    }
-                }, ct).ConfigureAwait(false);
-
-                ct.ThrowIfCancellationRequested();
-            }
-
-            await Provider.NameService.AddOrUpdateAsync(Host, ct).ConfigureAwait(false);
-        }
-
-        /// <summary>
-        /// Connect to address through a proxy
-        /// </summary>
-        /// <param name="address"></param>
-        /// <param name="proxy"></param>
-        /// <param name="ct"></param>
-        /// <returns></returns>
-        private async Task<bool> ConnectAsync(SocketAddress address, INameRecord proxy, 
-            CancellationToken ct) {
-
-            bool connected = await LinkOneAsync(proxy, address, ct).ConfigureAwait(false);
-            if (connected) {
-                Host.AddReference(proxy.Address);
             }
             else {
-                Host.RemoveReference(proxy.Address);
-            }
-            return connected;
-        }
+                // Auto bind - send references for the host first
+                foreach (var item in Host.References) {
+                    queries.Add(query.SendAsync(Provider.NameService.NewQuery(
+                        item, NameRecordType.Proxy), ct));
+                }
 
-        /// <summary>
-        /// Select a bind list for a host address if one exists
-        /// </summary>
-        /// <param name="endpoint"></param>
-        /// <param name="ct"></param>
-        /// <returns></returns>
-        private async Task BindAsync(CancellationToken ct) {
-            var bindList = new HashSet<INameRecord>();
-            foreach (var proxyRef in Host.References) {
-                var results = await Provider.NameService.LookupAsync(
-                    proxyRef, NameRecordType.Proxy, ct).ConfigureAwait(false);
-                bindList.AddRange(bindList);
+                // Post remainder...
+                queries.Add(query.SendAsync(Provider.NameService.NewQuery(
+                    Reference.All, NameRecordType.Proxy), ct));
             }
-            _bindList = bindList.Any() ? bindList : null;
-        }
 
-        public override Task ListenAsync(int backlog, CancellationToken ct) {
-            throw new NotSupportedException("Cannot call listen on client socket!");
+            await Task.WhenAll(queries.ToArray());
+            // Finalize query operations.
+            query.Complete();
+
+            // Wait until a connected link is received.  Then cancel the remainder of the pipeline.
+            Links.Add(await connection.ReceiveAsync(ct));
+            connection.Complete();
+            Provider.NameService.Update.Post(Tuple.Create(Host, true));
         }
 
         /// <summary>
@@ -291,6 +309,7 @@ namespace Microsoft.Azure.Devices.Proxy {
         }
 
         private Task<ProxyAsyncResult> _lastRead;
+        private SocketAddress _boundEndpoint;
         private DataMessage _lastData;
         private int _offset;
 #if PERF

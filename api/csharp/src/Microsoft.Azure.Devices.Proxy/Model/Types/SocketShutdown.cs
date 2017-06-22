@@ -3,11 +3,15 @@
 //  Licensed under the MIT License (MIT). See License.txt in the repo root for license information.
 // ------------------------------------------------------------
 
-namespace Microsoft.Azure.Devices.Proxy {
-    using System;
+// Keep in sync with native layer, in particular order of members!
 
+namespace Microsoft.Azure.Devices.Proxy {
     /// <summary>
-    /// Base transient exception
+    /// Shutdown value for Shutdown option
     /// </summary>
-    public class TransientException : Exception, ITransientException {}
+    public enum SocketShutdown {
+        Read = 0,
+        Write = 1,
+        Both = 2
+    }
 }

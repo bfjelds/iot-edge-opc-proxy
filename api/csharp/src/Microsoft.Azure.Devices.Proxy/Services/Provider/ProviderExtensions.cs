@@ -13,23 +13,33 @@ namespace Microsoft.Azure.Devices.Proxy {
     internal static class ProviderExtensions {
 
         /// <summary>
+        /// Lookup records with a name service query
+        /// </summary>
+        /// <param name="query"></param>
+        /// <param name="ct"></param>
+        /// <returns></returns>
+        public static async Task<IEnumerable<INameRecord>> LookupAsync(this INameService service,
+            IQuery query, CancellationToken ct) {
+            var result = new List<INameRecord>();
+            var lookup = service.Lookup(new ExecutionDataflowBlockOptions { CancellationToken = ct });
+            await lookup.SendAsync(query).ConfigureAwait(false);
+            while (await lookup.OutputAvailableAsync(ct).ConfigureAwait(false)) {
+                result.Add(await lookup.ReceiveAsync(ct).ConfigureAwait(false));
+            }
+            lookup.Complete();
+            return result;
+        }
+
+        /// <summary>
         /// Lookup records by name
         /// </summary>
         /// <param name="name"></param>
         /// <param name="type"></param>
         /// <param name="ct"></param>
         /// <returns></returns>
-        public static async Task<IEnumerable<INameRecord>> LookupAsync(this INameService service, 
-            string name, NameRecordType type, CancellationToken ct) {
-            var result = new List<INameRecord>();
-            var target = new ActionBlock<INameRecord>(n => result.Add(n),
-                new ExecutionDataflowBlockOptions { CancellationToken = ct });
-            var query = service.ByName(target, ct);
-            await query.SendAsync(Tuple.Create(name, type)).ConfigureAwait(false);
-            query.Complete();
-            await target.Completion.ConfigureAwait(false); 
-            return result;
-        }
+        public static Task<IEnumerable<INameRecord>> LookupAsync(this INameService service, 
+            string name, NameRecordType type, CancellationToken ct) =>
+            LookupAsync(service, service.NewQuery(name, type), ct);
 
         /// <summary>
         /// Lookup records by address
@@ -38,17 +48,9 @@ namespace Microsoft.Azure.Devices.Proxy {
         /// <param name="type"></param>
         /// <param name="ct"></param>
         /// <returns></returns>
-        public static async Task<IEnumerable<INameRecord>> LookupAsync(this INameService service, 
-            Reference address, NameRecordType type, CancellationToken ct) {
-            var result = new List<INameRecord>();
-            var target = new ActionBlock<INameRecord>(n => result.Add(n), 
-                new ExecutionDataflowBlockOptions { CancellationToken = ct });
-            var query = service.ByAddress(target, ct);
-            await query.SendAsync(Tuple.Create(address, type)).ConfigureAwait(false);
-            query.Complete();
-            await target.Completion.ConfigureAwait(false);
-            return result;
-        }
+        public static Task<IEnumerable<INameRecord>> LookupAsync(this INameService service, 
+            Reference address, NameRecordType type, CancellationToken ct) =>
+            LookupAsync(service, service.NewQuery(address, type), ct);
 
         /// <summary>
         /// Adds or updates a record in the name service

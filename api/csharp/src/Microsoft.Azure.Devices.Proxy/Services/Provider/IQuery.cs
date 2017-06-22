@@ -4,10 +4,10 @@
 // ------------------------------------------------------------
 
 namespace Microsoft.Azure.Devices.Proxy {
-    using System;
 
     /// <summary>
-    /// Base transient exception
+    /// An opaque query that can be passed to the name service provider's
+    /// lookup target block.
     /// </summary>
-    public class TransientException : Exception, ITransientException {}
+    public interface IQuery {}
 }

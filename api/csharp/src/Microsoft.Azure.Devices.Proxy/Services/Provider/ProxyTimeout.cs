@@ -9,12 +9,15 @@ namespace Microsoft.Azure.Devices.Proxy {
     public class ProxyTimeout : TimeoutException {
 
         public ProxyTimeout() : 
-            this(null) {
+            base("Proxy operation timed out") {
         }
 
         public ProxyTimeout(Exception innerException) :
             base("Proxy operation timed out", innerException) {
         }
-    }
 
+        public ProxyTimeout(AggregateException innerException) :
+            base("Proxy operation timed out", innerException.Flatten()) {
+        }
+    }
 }

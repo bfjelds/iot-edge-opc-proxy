@@ -37,7 +37,6 @@ namespace Microsoft.Azure.Devices.Proxy {
         /// </summary>
         public SocketInfo Info { get; private set; }
 
-
         /// <summary>
         /// List of proxy links - i.e. open sockets or bound sockets on the remote
         /// proxy server.  This is a list of links allowing this socket to create 
@@ -94,6 +93,7 @@ namespace Microsoft.Azure.Devices.Proxy {
                 }
                 else if (message.TypeId != MessageContent.Data) {
                     return null;
+                    // todo:
                 }
                 return message;
             });
@@ -118,219 +118,320 @@ namespace Microsoft.Azure.Devices.Proxy {
         /// <param name="provider"></param>
         /// <returns></returns>
         public static ProxySocket Create(SocketInfo info, IProvider provider) {
-            // Create specializations for tcp and udp
             /**/ if (info.Protocol == ProtocolType.Tcp) {
                 if (0 != (info.Flags & (uint)SocketFlags.Passive)) {
                     return new TCPServerSocket(info, provider);
                 }
-                return new TCPClientSocket(info, provider);
+                else {
+                    return new TCPClientSocket(info, provider);
+                }
             }
             else if (info.Protocol == ProtocolType.Udp) {
-                return new UDPSocket(info, provider);
+                if (0 != (info.Flags & (uint)SocketFlags.Passive)) {
+                    return new UDPSocket(info, provider);
+                }
+                else {
+                    throw new ArgumentException("UDP sockets must be passive.");
+                }
             }
             else {
                 throw new NotSupportedException("Only UDP and TCP supported right now.");
             }
         }
 
+        /// <summary>
+        /// Creates a linker block that for every name record tries to create and open a 
+        /// link which is posted to the output.
+        /// </summary>
+        /// <param name="parallel">Whether to link one at a time (single) or in parallel (all)</param>
+        /// <param name="ct">Cancels the link step</param>
+        /// <returns></returns>
+        protected IPropagatorBlock<DataflowMessage<INameRecord>, IProxyLink> CreateLinkBlock(
+            ITargetBlock<DataflowMessage<INameRecord>> error, ExecutionDataflowBlockOptions options) {
 
+            if (options == null) {
+                throw new ArgumentNullException(nameof(options));
+            }
+            var ct = options.CancellationToken;
+            if (ct == null) {
+                throw new ArgumentNullException(nameof(ct));
+            }
 
+            return new TransformManyBlock<DataflowMessage<INameRecord>, IProxyLink>(
+            async (input) => {
+                var proxy = input.Arg;
+                ProxyEventSource.Log.LinkCreate(this, proxy.Name, Info.Address);
+                try {
+                    // Create link, i.e. perform bind, connect, listen, etc. on proxy
+                    Message response = await Provider.ControlChannel.CallAsync(proxy,
+                        new Message(Id, Reference.Null, new LinkRequest {
+                            Properties = Info
+                        }), TimeSpan.MaxValue, ct);
 
+                    var linkResponse = response?.Content as LinkResponse;
+                    if (linkResponse == null || response.Error != (int)SocketError.Success) {
+                        ProxyEventSource.Log.LinkFailure(this, proxy.Name, Info, response, null);
+                        error.Push(input, new ProxyException(
+                            response == null ? SocketError.NoHost : (SocketError)response.Error));
+                        return Enumerable.Empty<IProxyLink>();
+                    }
 
+                    // now create local link and open link for streaming
+                    var link = new ProxyLink(this, proxy, linkResponse.LinkId,
+                        linkResponse.LocalAddress, linkResponse.PeerAddress);
+                    try {
+                        // Broker connection string to proxy
+                        var openRequest = await link.BeginOpenAsync(ct).ConfigureAwait(false);
+                        ProxyEventSource.Log.LinkOpen(this, proxy.Name, Info.Address);
 
+                        await Provider.ControlChannel.CallAsync(proxy, new Message(Id, linkResponse.LinkId,
+                            openRequest), TimeSpan.MaxValue, ct).ConfigureAwait(false);
 
+                        // Wait until remote side opens stream connection
+                        bool success = await link.TryCompleteOpenAsync(ct).ConfigureAwait(false);
+                        if (success) {
+
+                            // Link Send and receive blocks to the socket
+                            SendBlock.LinkTo(link.SendBlock);
+                            link.ReceiveBlock.LinkTo(ReceiveBlock);
+
+                            ProxyEventSource.Log.LinkComplete(this, proxy.Name, Info.Address);
+                            return link.AsEnumerable();
+                        }
+                    }
+                    catch (OperationCanceledException) { }
+                    catch (Exception e) {
+                        // Try to close remote side
+                        ProxyEventSource.Log.LinkFailure(this, proxy.Name, Info.Address, null, e);
+                        await link.CloseAsync(CancellationToken.None).ConfigureAwait(false);
+                        error.Push(input, e);
+                    }
+                    return Enumerable.Empty<IProxyLink>();
+                }
+                catch (ProxyNotFound pnf) {
+                    // The proxy was not reachable - try again later
+                    ProxyEventSource.Log.HandledExceptionAsInformation(this, pnf);
+                    error.Push(input, null);
+                }
+                catch (ProxyTimeout pte) {
+                    // The proxy request timed out - increase timeout...
+                    ProxyEventSource.Log.HandledExceptionAsInformation(this, pte);
+                    error.Push(input, pte);
+                }
+                catch (OperationCanceledException) { }
+                catch (Exception e) {
+                    ProxyEventSource.Log.HandledExceptionAsWarning(this, e);
+                    // Log as error and continue...
+                }
+                return Enumerable.Empty<IProxyLink>();
+            },
+            options);
+        }
 
         /// <summary>
-        /// Perform a link handshake with the passed proxies and populate streams
+        /// Creates a pinger block that sends a ping and returns 
         /// </summary>
-        /// <param name="proxies">The proxies (interfaces) to bind the link on</param>
-        /// <param name="address">Address to connect to, or null if passive</param>
-        /// <param name="ct">Cancels operation</param>
+        /// <param name="address">Address to ping for</param>
+        /// <param name="timeout">Timeout of ping request</param>
+        /// <param name="ct">Cancels the ping step(s)</param>
         /// <returns></returns>
-        public async Task<bool> LinkAllAsync(IEnumerable<INameRecord> proxies, SocketAddress address, 
-            CancellationToken ct) {
+        protected IPropagatorBlock<DataflowMessage<INameRecord>, DataflowMessage<INameRecord>> CreatePingBlock(
+            ITargetBlock<DataflowMessage<INameRecord>> error, SocketAddress address, ExecutionDataflowBlockOptions options) {
+
+            var timeoutInSeconds = 5;  // Initial timeout is 5 seconds, increases with each error...
+            if (options == null) {
+                throw new ArgumentNullException(nameof(options));
+            }
+            var ct = options.CancellationToken;
+            if (ct == null) {
+                throw new ArgumentNullException(nameof(ct));
+            }
+
+            return new TransformManyBlock<DataflowMessage<INameRecord>, DataflowMessage<INameRecord>>(
+            async (input) => {
+                var record = input.Arg;
+                try {
+                    // Increase timeout up to max timeout based on number of exceptions
+                    var pingTimeout = TimeSpan.FromSeconds(
+                        timeoutInSeconds * (input.Exceptions.Count + 1));
+
+                    // Do the call
+                    var response = await Provider.ControlChannel.CallAsync(record,
+                        new Message(Id, Reference.Null, new PingRequest(address)),
+                            pingTimeout, ct).ConfigureAwait(false);
+
+                    var result = response?.Content as PingResponse;
+                    if (result != null) {
+                        if (response.Error == (int)SocketError.Success) {
+                            return input.AsEnumerable();
+                        }
+                        else {
+                            // Log
+                        }
+                    }
+                    else {
+                        // Unexpected 
+                        // Log as error!
+                        // Todo
+                    }
+                }
+                catch (ProxyNotFound pnf) {
+                    // The proxy was not reachable - try again later
+                    ProxyEventSource.Log.HandledExceptionAsInformation(this, pnf);
+                    error.Push(input, null);
+                }
+                catch (ProxyTimeout pte) {
+                    // The proxy request timed out - increase timeout...
+                    ProxyEventSource.Log.HandledExceptionAsInformation(this, pte);
+                    error.Push(input, pte);
+                }
+                catch (Exception e) {
+                    ProxyEventSource.Log.HandledExceptionAsWarning(this, e);
+                    // Log as error and continue...
+                }
+                return Enumerable.Empty<DataflowMessage<INameRecord>>();
+            }, 
+            options);
+        }
+
+        /// <summary>
+        /// Bind to provided endpoint(s) - return on first success
+        /// </summary>
+        /// <param name="endpoint"></param>
+        /// <param name="ct"></param>
+        /// <returns></returns>
+        protected async Task LinkAsync(SocketAddress endpoint, CancellationToken ct) {
 
             // Complete socket info
-            Info.Address = address;
-
-            if (Info.Address == null) {
-                Info.Address = new NullSocketAddress();
-                Info.Flags |= (uint)SocketFlags.Passive;
-            }
             Info.Options.UnionWith(_optionCache.Select(p => new Property<ulong>(
                 (uint)p.Key, p.Value)));
 
-            var tasks = new List<Task<IProxyLink>>();
-            foreach (var proxy in proxies) {
-                if (proxy == null)
-                    break;
-                tasks.Add(CreateLinkAsync(proxy, ct));
+            //
+            // Create tpl network for connect - prioritize input above errored attempts using
+            // prioritized scheduling queue.
+            //
+            var tcs = new TaskCompletionSource<bool>();
+            ct.Register(() => tcs.TrySetCanceled());
+
+            var input = DataflowMessage<INameRecord>.CreateAdapter(new ExecutionDataflowBlockOptions {
+                CancellationToken = _open.Token,
+                MaxDegreeOfParallelism = DataflowBlockOptions.Unbounded,
+                MaxMessagesPerTask = DataflowBlockOptions.Unbounded,
+                TaskScheduler = QueuedTaskScheduler.Priority[127]
+            });
+
+            var errors = new TransformManyBlock<DataflowMessage<INameRecord>, DataflowMessage<INameRecord>>(
+                (error) => {
+                    // Handle errors that occur while linking
+                    int linksFound;
+                    lock (Links) {
+                        linksFound = Links.Count();
+                    }
+                        Console.WriteLine($"Exception connecting to {error}");
+                    if (linksFound == 0 && error.Exceptions.Count < 5) {
+                        return error.AsEnumerable();
+                    }
+                    else {
+                        // Give up
+                        Console.WriteLine($"Give up {error}");
+                        return Enumerable.Empty<DataflowMessage<INameRecord>>();
+                    }
+                },
+
+            new ExecutionDataflowBlockOptions {
+                CancellationToken = _open.Token,
+                MaxDegreeOfParallelism = 1,
+                MaxMessagesPerTask = DataflowBlockOptions.Unbounded,
+                TaskScheduler = QueuedTaskScheduler.Priority[255] // Low priority
+            });
+
+            var query = Provider.NameService.Lookup(new ExecutionDataflowBlockOptions {
+                CancellationToken = _open.Token,
+                MaxDegreeOfParallelism = DataflowBlockOptions.Unbounded,
+                MaxMessagesPerTask = DataflowBlockOptions.Unbounded,
+                TaskScheduler = QueuedTaskScheduler.Priority[127]
+            });
+
+            var linker = CreateLinkBlock(errors, new ExecutionDataflowBlockOptions {
+                CancellationToken = _open.Token,
+                MaxDegreeOfParallelism = DataflowBlockOptions.Unbounded,
+                MaxMessagesPerTask = 1,
+                TaskScheduler = QueuedTaskScheduler.Priority[127]
+            });
+
+            // When first connected mark tcs as complete
+            var connected = new ActionBlock<IProxyLink>(l => {
+                lock (Links) {
+                    if (!Links.Any()) {
+                        tcs.TrySetResult(true);
+                    }
+                    Links.Add(l);
+                }
+            });
+
+            // If no one connected but connected action completes, throw error.
+            var completed = connected.Completion.ContinueWith(t => {
+                lock (Links) {
+                    if (t.IsFaulted) {
+                        tcs.TrySetException(t.Exception);
+                    }
+                    else if (t.IsCanceled) {
+                        tcs.TrySetCanceled();
+                    }
+                    else if (!Links.Any()) {
+                        tcs.TrySetException(new ProxyNotFound("No proxy is online!"));
+                    }
+                }
+            });
+
+            query.ConnectTo(input);
+            input.ConnectTo(linker);
+            errors.ConnectTo(linker);
+            linker.ConnectTo(connected);
+
+            //
+            // Query generates name records from device registry based on the passed proxy information.
+            // these are then posted to the linker for linking.  When the first link is established
+            // Connect returns successful, but proxy continues linking until disposed
+            //
+            var queries = new List<Task<bool>>();
+            if (endpoint == null || endpoint is AnySocketAddress) {
+                queries.Add(query.SendAsync(Provider.NameService.NewQuery(
+                    Reference.All, NameRecordType.Proxy), ct));
             }
-            try {
-                var results = await Task.WhenAll(tasks.ToArray()).ConfigureAwait(false);
-                Links.AddRange(results.Where(v => v != null));
+            else {
+                while (endpoint.Family == AddressFamily.Bound) {
+                    // Unwrap bound address
+                    endpoint = ((BoundSocketAddress)endpoint).LocalAddress;
+                }
 
-                return results.Any();
-            }
-            catch (Exception ex) {
-                ProxyEventSource.Log.HandledExceptionAsInformation(this, ex);
-                // continue...
-            }
-            return false;
-        }
-
-        /// <summary>
-        /// Perform excatly one or zero link handshakes with one of the passed proxies 
-        /// and populate streams
-        /// </summary>
-        /// <param name="proxy">The proxy to bind the link on</param>
-        /// <param name="address">Address to connect to, or null if proxy bound</param>
-        /// <param name="ct">Cancels operation</param>
-        /// <returns></returns>
-        public async Task<bool> LinkOneAsync(INameRecord proxy, SocketAddress address, 
-            CancellationToken ct) {
-
-            // Complete socket info
-            Info.Address = address ?? new NullSocketAddress();
-            Info.Flags = address != null ? 0 : (uint)SocketFlags.Passive;
-            Info.Options.UnionWith(_optionCache.Select(p => new Property<ulong>(
-                (uint)p.Key, p.Value)));
-
-            try {
-                var link = await CreateLinkAsync(proxy, ct).ConfigureAwait(false);
-                if (link != null) {
-                    Links.Add(link);
-                    return true;
+                if (endpoint.Family == AddressFamily.Collection) {
+                    foreach (var item in ((SocketAddressCollection)endpoint).Addresses()) {
+                        queries.Add(query.SendAsync(Provider.NameService.NewQuery(
+                            item.ToString(), NameRecordType.Proxy), ct));
+                    }
+                }
+                else {
+                    queries.Add(query.SendAsync(Provider.NameService.NewQuery(
+                        endpoint.ToString(), NameRecordType.Proxy), ct));
                 }
             }
-            catch(Exception ex) {
-                ProxyEventSource.Log.HandledExceptionAsInformation(this, ex);
-                // continue...
-            }
-            return false;
+
+            await Task.WhenAll(queries.ToArray());
+            // Signalled when the first links is queued to connected block or user cancelled
+            await tcs.Task.ConfigureAwait(false);
+
+            Console.WriteLine("Connected!");
         }
-
-        /// <summary>
-        /// Create and open link to proxy
-        /// </summary>
-        /// <param name="proxy"></param>
-        /// <param name="ct"></param>
-        /// <returns></returns>
-        private async Task<IProxyLink> CreateLinkAsync(INameRecord proxy, 
-            CancellationToken ct) {
-
-            ProxyEventSource.Log.LinkCreate(this, proxy.Name, Info.Address);
-            // Create link, i.e. perform bind, connect, listen, etc. on proxy
-            Message response = await Provider.ControlChannel.CallAsync(proxy,
-                new Message(Id, Reference.Null, new LinkRequest {
-                    Properties = Info
-                }), ct);
-            if (response == null || response.Error != (int)SocketError.Success) {
-                ProxyEventSource.Log.LinkFailure(this, proxy.Name, Info, response, null);
-                return null;
-            }
-
-            var linkResponse = response.Content as LinkResponse;
-            if (linkResponse == null) {
-                ProxyEventSource.Log.LinkFailure(this, proxy.Name, Info, response, null);
-                return null;
-            }
-
-            // now create local link and open link for streaming
-            var link = new ProxyLink(this, proxy, linkResponse.LinkId,
-                linkResponse.LocalAddress, linkResponse.PeerAddress);
-            try {
-                // Broker connection string to proxy
-                var openRequest = await link.BeginOpenAsync(ct).ConfigureAwait(false);
-                ProxyEventSource.Log.LinkOpen(this, proxy.Name, Info.Address);
-
-                await Provider.ControlChannel.CallAsync(proxy,
-                    new Message(Id, linkResponse.LinkId, openRequest), ct).ConfigureAwait(false);
-
-                // Wait until remote side opens stream connection
-                bool success = await link.TryCompleteOpenAsync(ct).ConfigureAwait(false);
-                if (success) {
-
-                    // Link Send and receive blocks to the socket
-                    SendBlock.LinkTo(link.SendBlock);
-                    link.ReceiveBlock.LinkTo(ReceiveBlock);
-
-                    ProxyEventSource.Log.LinkComplete(this, proxy.Name, Info.Address);
-                    return link;
-                }
-            }
-            catch (Exception e) {
-                // Try to close remote side
-                await link.CloseAsync(CancellationToken.None).ConfigureAwait(false);
-                ProxyEventSource.Log.LinkFailure(this, proxy.Name, Info.Address, null, e);
-            }
-            return null;
-        }
-
-        /// <summary>
-        /// Close and release link
-        /// </summary>
-        /// <param name="link"></param>
-        /// <param name="ct"></param>
-        /// <returns></returns>
-        private async Task ReleaseLinkAsync(IProxyLink link, CancellationToken ct) {
-            if (Links.Remove(link)) {
-                await link.CloseAsync(ct);
-            }
-        }
-
-
-
-
-        //
-        // LookupBlock(SQL) => batches or records
-        // 
-        // InvokeMethodTransformBlock -> record + message
-        //
-        // BufferBlock - Receive response from 
-        //
-        // ReceiveAsync from BufferBlock - Once done cancel all
-        //
-
-        
-
-
 
 
         /// <summary>
         /// Select the proxy to bind to
         /// </summary>
-        /// <param name="endpoint"></param>
+        /// <param name="address"></param>
         /// <param name="ct"></param>
         /// <returns></returns>
-        public virtual async Task BindAsync(SocketAddress endpoint, CancellationToken ct) {
-            // Proxy selected, look up name records for the proxy address
-
-            if (endpoint.Family == AddressFamily.Bound) {
-                // Unwrap bound address
-                endpoint = ((BoundSocketAddress)endpoint).LocalAddress;
-            }
-
-            IEnumerable<SocketAddress> addresses;
-            if (endpoint.Family == AddressFamily.Collection) {
-                // Unwrap collection
-                addresses = ((SocketAddressCollection) endpoint).Addresses();
-            }
-            else {
-                addresses = endpoint.AsEnumerable();
-            }
-
-            var bindList = new HashSet<INameRecord>();
-            foreach (var address in addresses) {
-                var result = await Provider.NameService.LookupAsync(
-                    address.ToString(), NameRecordType.Proxy, ct).ConfigureAwait(false);
-                bindList.AddRange(result);
-            }
-            if (!bindList.Any()) {
-                throw new SocketException(SocketError.NoAddress);
-            }
-            _bindList = bindList;
-        }
+        public abstract Task BindAsync(SocketAddress address, CancellationToken ct);
 
         /// <summary>
         /// Connect - only for tcp
@@ -366,6 +467,23 @@ namespace Microsoft.Azure.Devices.Proxy {
         /// <returns></returns>
         public abstract Task<ProxyAsyncResult> ReceiveAsync(
             ArraySegment<byte> buffer, CancellationToken ct);
+
+        /// <summary>
+        /// Close all socket streams and thus this socket
+        /// </summary>
+        /// <param name="ct"></param>
+        public virtual async Task CloseAsync(CancellationToken ct) {
+            try {
+                var links = Links.ToArray();
+                await Task.WhenAll(links.Select(l => l.CloseAsync(ct))).ConfigureAwait(false);
+            }
+            catch (Exception e) {
+                throw new SocketException(e);
+            }
+            finally {
+                _open.Cancel(true);
+            }
+        }
 
         /// <summary>
         /// Send socket option message to all streams
@@ -421,31 +539,6 @@ namespace Microsoft.Azure.Devices.Proxy {
         }
 
         /// <summary>
-        /// Close all socket streams and thus this socket
-        /// </summary>
-        /// <param name="ct"></param>
-        public virtual async Task CloseAsync(CancellationToken ct) {
-            try {
-                var links = Links.ToArray();
-                await Task.WhenAll(links.Select(i => ReleaseLinkAsync(i, 
-                    ct))).ConfigureAwait(false);
-            }
-            catch (Exception e) {
-                throw new SocketException(e);
-            }
-        }
-
-
-
-
-
-
-
-
-
-
-
-        /// <summary>
         /// Returns a string that represents the socket.
         /// </summary>
         /// <returns>A string that represents the socket.</returns>
@@ -465,8 +558,12 @@ namespace Microsoft.Azure.Devices.Proxy {
             }
         }
 
-        protected IEnumerable<INameRecord> _bindList;
-        private readonly Dictionary<SocketOption, ulong> _optionCache = 
+        public void Dispose() {
+            _open.Cancel(false);
+        }
+
+        protected CancellationTokenSource _open = new CancellationTokenSource();
+        protected readonly Dictionary<SocketOption, ulong> _optionCache = 
             new Dictionary<SocketOption, ulong>();
     }
 }

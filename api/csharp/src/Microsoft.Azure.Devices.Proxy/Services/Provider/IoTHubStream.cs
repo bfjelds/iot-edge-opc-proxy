@@ -48,14 +48,15 @@ namespace Microsoft.Azure.Devices.Proxy.Provider {
         /// <param name="ct"></param>
         /// <returns></returns>
         public Task OpenAsync(IMessageStream stream, CancellationToken ct) {
-            
+
             // Link to action block sending in order
+            var sendTimeout = TimeSpan.FromMilliseconds(_pollTimeout * 2);
             stream.SendBlock.LinkTo(new ActionBlock<Message>(async (message) => {
                 message.Source = _streamId;
                 message.Target = _remoteId;
                 try {
                     var response = await _iotHub.TryInvokeDeviceMethodWithRetryAsync(
-                        _link, message, _pollTimeout, _open.Token).ConfigureAwait(false);
+                        _link, message, sendTimeout, _open.Token).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException) {
                     stream.SendBlock.Complete();
@@ -71,15 +72,21 @@ namespace Microsoft.Azure.Devices.Proxy.Provider {
             }));
 
             // Start producer receiving from poll
-            _producerTask = Task.Run(async () => {
+            _producerTask = Task.Factory.StartNew(async () => {
                 try {
                     while (true) {
                         var response = await _iotHub.TryInvokeDeviceMethodAsync(_link,
-                            new Message(_streamId, _remoteId, new PollRequest(30000)),
-                                _pollTimeout, _open.Token).ConfigureAwait(false);
-                        if (response != null) {
+                            new Message(_streamId, _remoteId, new PollRequest(_pollTimeout)),
+                                sendTimeout, _open.Token).ConfigureAwait(false);
+                        //
+                        // Poll receives back a timeout error in case no data was available 
+                        // within the requested timeout. This is decoupled from the consumers
+                        // that time out on their cancellation tokens.
+                        //
+                        if (response != null && response.Error != (int)SocketError.Timeout) {
                             await stream.ReceiveBlock.SendAsync(response).ConfigureAwait(false);
                         }
+                        // Continue polling until closed in which case we complete receive
                         _open.Token.ThrowIfCancellationRequested();
                     }
                 }
@@ -90,8 +97,8 @@ namespace Microsoft.Azure.Devices.Proxy.Provider {
                     stream.ReceiveBlock.Fault(e);
                     ProxyEventSource.Log.HandledExceptionAsError(this, e);
                 }
-            });
-            return Task.FromResult(true);
+            }, _open.Token, TaskCreationOptions.LongRunning, QueuedTaskScheduler.Priority[0]).Unwrap();
+            return TaskEx.Completed;
         }
 
         /// <summary>
@@ -100,7 +107,7 @@ namespace Microsoft.Azure.Devices.Proxy.Provider {
         /// <returns></returns>
         public Task CloseAsync() {
             _open.Cancel();
-            return Task.FromResult(true);
+            return TaskEx.Completed;
         }
 
         private Task _producerTask;
@@ -109,6 +116,6 @@ namespace Microsoft.Azure.Devices.Proxy.Provider {
         private readonly Reference _streamId;
         private readonly Reference _remoteId;
         private readonly INameRecord _link;
-        private static readonly TimeSpan _pollTimeout = TimeSpan.FromMinutes(1);
+        private static readonly ulong _pollTimeout = 60000; // 60 seconds default poll timeout
     }
 }

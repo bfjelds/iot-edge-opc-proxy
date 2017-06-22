@@ -40,7 +40,7 @@ namespace Microsoft.Azure.Devices.Proxy {
         /// <returns></returns>
         public static bool TryParse(string address, out SocketAddress parsed) {
             /**/ if (string.IsNullOrEmpty(address)) {
-                parsed = new NullSocketAddress();
+                parsed = new AnySocketAddress();
             }
             else if (InetSocketAddress.TryParse(address, out InetSocketAddress inet)) {
                 parsed = inet;
@@ -49,7 +49,7 @@ namespace Microsoft.Azure.Devices.Proxy {
                 parsed = proxy;
             }
             else {
-                parsed = new NullSocketAddress();
+                parsed = new AnySocketAddress();
                 return false;
             }
             return true;

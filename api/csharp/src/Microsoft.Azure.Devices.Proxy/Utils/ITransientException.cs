@@ -4,10 +4,9 @@
 // ------------------------------------------------------------
 
 namespace Microsoft.Azure.Devices.Proxy {
-    using System;
 
     /// <summary>
-    /// Base transient exception
+    /// Describes an exception that is transient in nature - i.e. should be retried.
     /// </summary>
-    public class TransientException : Exception, ITransientException {}
+    public interface ITransientException {}
 }

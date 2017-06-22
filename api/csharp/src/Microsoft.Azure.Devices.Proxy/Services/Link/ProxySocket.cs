@@ -20,7 +20,7 @@ namespace Microsoft.Azure.Devices.Proxy {
     /// output transform from binary buffer to actual messages that are serialized/
     /// deserialized at the provider level (next level).
     /// </summary>
-    public abstract class ProxySocket : IProxySocket, IMessageStream, IDisposable {
+    public abstract class ProxySocket : IProxySocket, IMessageStream {
 
         /// <summary>
         /// Reference id for this socket
@@ -146,12 +146,19 @@ namespace Microsoft.Azure.Devices.Proxy {
         /// <param name="parallel">Whether to link one at a time (single) or in parallel (all)</param>
         /// <param name="ct">Cancels the link step</param>
         /// <returns></returns>
-        protected IPropagatorBlock<DataflowMessage<INameRecord>, IProxyLink> Linker(
-            ITargetBlock<DataflowMessage<INameRecord>> error,
-            bool parallel, CancellationToken ct) {
+        protected IPropagatorBlock<DataflowMessage<INameRecord>, IProxyLink> CreateLinkBlock(
+            ITargetBlock<DataflowMessage<INameRecord>> error, ExecutionDataflowBlockOptions options) {
 
-            var output = new BufferBlock<IProxyLink>();
-            var linker = new ActionBlock<DataflowMessage<INameRecord>>(async (input) => {
+            if (options == null) {
+                throw new ArgumentNullException(nameof(options));
+            }
+            var ct = options.CancellationToken;
+            if (ct == null) {
+                throw new ArgumentNullException(nameof(ct));
+            }
+
+            return new TransformManyBlock<DataflowMessage<INameRecord>, IProxyLink>(
+            async (input) => {
                 var proxy = input.Arg;
                 ProxyEventSource.Log.LinkCreate(this, proxy.Name, Info.Address);
                 try {
@@ -164,8 +171,9 @@ namespace Microsoft.Azure.Devices.Proxy {
                     var linkResponse = response?.Content as LinkResponse;
                     if (linkResponse == null || response.Error != (int)SocketError.Success) {
                         ProxyEventSource.Log.LinkFailure(this, proxy.Name, Info, response, null);
-                        error.Push(input, new ProxyException((SocketError)response.Error));
-                        return;
+                        error.Push(input, new ProxyException(
+                            response == null ? SocketError.NoHost : (SocketError)response.Error));
+                        return Enumerable.Empty<IProxyLink>();
                     }
 
                     // now create local link and open link for streaming
@@ -188,39 +196,36 @@ namespace Microsoft.Azure.Devices.Proxy {
                             link.ReceiveBlock.LinkTo(ReceiveBlock);
 
                             ProxyEventSource.Log.LinkComplete(this, proxy.Name, Info.Address);
-                            output.Post(link);
+                            return link.AsEnumerable();
                         }
                     }
+                    catch (OperationCanceledException) { }
                     catch (Exception e) {
                         // Try to close remote side
+                        ProxyEventSource.Log.LinkFailure(this, proxy.Name, Info.Address, null, e);
                         await link.CloseAsync(CancellationToken.None).ConfigureAwait(false);
                         error.Push(input, e);
-                        ProxyEventSource.Log.LinkFailure(this, proxy.Name, Info.Address, null, e);
                     }
+                    return Enumerable.Empty<IProxyLink>();
                 }
                 catch (ProxyNotFound pnf) {
                     // The proxy was not reachable - try again later
                     ProxyEventSource.Log.HandledExceptionAsInformation(this, pnf);
                     error.Push(input, null);
-                    return;
                 }
                 catch (ProxyTimeout pte) {
                     // The proxy request timed out - increase timeout...
                     ProxyEventSource.Log.HandledExceptionAsInformation(this, pte);
                     error.Push(input, pte);
-                    return;
                 }
+                catch (OperationCanceledException) { }
                 catch (Exception e) {
                     ProxyEventSource.Log.HandledExceptionAsWarning(this, e);
                     // Log as error and continue...
-                    return;
                 }
-
-            }, new ExecutionDataflowBlockOptions {
-                MaxDegreeOfParallelism = parallel ? Environment.ProcessorCount : 1,
-                CancellationToken = ct
-            });
-            return DataflowBlock.Encapsulate(linker, output);
+                return Enumerable.Empty<IProxyLink>();
+            },
+            options);
         }
 
         /// <summary>
@@ -230,14 +235,20 @@ namespace Microsoft.Azure.Devices.Proxy {
         /// <param name="timeout">Timeout of ping request</param>
         /// <param name="ct">Cancels the ping step(s)</param>
         /// <returns></returns>
-        protected IPropagatorBlock<DataflowMessage<INameRecord>, DataflowMessage<INameRecord>> Pinger(
-            ITargetBlock<DataflowMessage<INameRecord>> error, 
-            SocketAddress address, CancellationToken ct) {
+        protected IPropagatorBlock<DataflowMessage<INameRecord>, DataflowMessage<INameRecord>> CreatePingBlock(
+            ITargetBlock<DataflowMessage<INameRecord>> error, SocketAddress address, ExecutionDataflowBlockOptions options) {
 
             var timeoutInSeconds = 5;  // Initial timeout is 5 seconds, increases with each error...
-            var output = new BufferBlock<DataflowMessage<INameRecord>>();
+            if (options == null) {
+                throw new ArgumentNullException(nameof(options));
+            }
+            var ct = options.CancellationToken;
+            if (ct == null) {
+                throw new ArgumentNullException(nameof(ct));
+            }
 
-            var pinger = new ActionBlock<DataflowMessage<INameRecord>>(async (input) => {
+            return new TransformManyBlock<DataflowMessage<INameRecord>, DataflowMessage<INameRecord>>(
+            async (input) => {
                 var record = input.Arg;
                 try {
                     // Increase timeout up to max timeout based on number of exceptions
@@ -252,7 +263,7 @@ namespace Microsoft.Azure.Devices.Proxy {
                     var result = response?.Content as PingResponse;
                     if (result != null) {
                         if (response.Error == (int)SocketError.Success) {
-                            output.Push(input);
+                            return input.AsEnumerable();
                         }
                         else {
                             // Log
@@ -278,12 +289,9 @@ namespace Microsoft.Azure.Devices.Proxy {
                     ProxyEventSource.Log.HandledExceptionAsWarning(this, e);
                     // Log as error and continue...
                 }
+                return Enumerable.Empty<DataflowMessage<INameRecord>>();
             }, 
-            new ExecutionDataflowBlockOptions {
-                MaxDegreeOfParallelism = Environment.ProcessorCount,
-                CancellationToken = ct
-            });
-            return DataflowBlock.Encapsulate(pinger, output);
+            options);
         }
 
         /// <summary>
@@ -305,45 +313,91 @@ namespace Microsoft.Azure.Devices.Proxy {
             var tcs = new TaskCompletionSource<bool>();
             ct.Register(() => tcs.TrySetCanceled());
 
-            var input = DataflowBlockEx.DataflowMessageTransformBlock<INameRecord>(
-                new ExecutionDataflowBlockOptions {
-                    CancellationToken = _open.Token,
-                    TaskScheduler = _scheduler.ActivateNewQueue(0)
-                });
-            var errors = new BufferBlock<DataflowMessage<INameRecord>>(
-                new DataflowBlockOptions {
-                    CancellationToken = _open.Token,
-                    TaskScheduler = _scheduler.ActivateNewQueue(1)
-                });
+            var input = DataflowMessage<INameRecord>.CreateAdapter(new ExecutionDataflowBlockOptions {
+                CancellationToken = _open.Token,
+                MaxDegreeOfParallelism = DataflowBlockOptions.Unbounded,
+                MaxMessagesPerTask = DataflowBlockOptions.Unbounded,
+                TaskScheduler = QueuedTaskScheduler.Priority[127]
+            });
 
-            var query = Provider.NameService.Lookup(input, _open.Token);
-            var linker = Linker(errors, true, _open.Token);
+            var errors = new TransformManyBlock<DataflowMessage<INameRecord>, DataflowMessage<INameRecord>>(
+                (error) => {
+                    // Handle errors that occur while linking
+                    int linksFound;
+                    lock (Links) {
+                        linksFound = Links.Count();
+                    }
+                        Console.WriteLine($"Exception connecting to {error}");
+                    if (linksFound == 0 && error.Exceptions.Count < 5) {
+                        return error.AsEnumerable();
+                    }
+                    else {
+                        // Give up
+                        Console.WriteLine($"Give up {error}");
+                        return Enumerable.Empty<DataflowMessage<INameRecord>>();
+                    }
+                },
+
+            new ExecutionDataflowBlockOptions {
+                CancellationToken = _open.Token,
+                MaxDegreeOfParallelism = 1,
+                MaxMessagesPerTask = DataflowBlockOptions.Unbounded,
+                TaskScheduler = QueuedTaskScheduler.Priority[255] // Low priority
+            });
+
+            var query = Provider.NameService.Lookup(new ExecutionDataflowBlockOptions {
+                CancellationToken = _open.Token,
+                MaxDegreeOfParallelism = DataflowBlockOptions.Unbounded,
+                MaxMessagesPerTask = DataflowBlockOptions.Unbounded,
+                TaskScheduler = QueuedTaskScheduler.Priority[127]
+            });
+
+            var linker = CreateLinkBlock(errors, new ExecutionDataflowBlockOptions {
+                CancellationToken = _open.Token,
+                MaxDegreeOfParallelism = DataflowBlockOptions.Unbounded,
+                MaxMessagesPerTask = 1,
+                TaskScheduler = QueuedTaskScheduler.Priority[127]
+            });
 
             // When first connected mark tcs as complete
             var connected = new ActionBlock<IProxyLink>(l => {
-                if (!Links.Any()) {
-                    tcs.TrySetResult(true);
-                }
-                Links.Add(l);
-            });
-            // If no one connected but connected action completes, throw error.
-            var completed = connected.Completion.ContinueWith(_ => {
-                if (!Links.Any()) {
-                    tcs.TrySetException(new ProxyException(SocketError.NoHost));
+                lock (Links) {
+                    if (!Links.Any()) {
+                        tcs.TrySetResult(true);
+                    }
+                    Links.Add(l);
                 }
             });
 
-            input.LinkTo(linker);
-            errors.LinkTo(linker);
-            linker.LinkTo(connected);
+            // If no one connected but connected action completes, throw error.
+            var completed = connected.Completion.ContinueWith(t => {
+                lock (Links) {
+                    if (t.IsFaulted) {
+                        tcs.TrySetException(t.Exception);
+                    }
+                    else if (t.IsCanceled) {
+                        tcs.TrySetCanceled();
+                    }
+                    else if (!Links.Any()) {
+                        tcs.TrySetException(new ProxyNotFound("No proxy is online!"));
+                    }
+                }
+            });
+
+            query.ConnectTo(input);
+            input.ConnectTo(linker);
+            errors.ConnectTo(linker);
+            linker.ConnectTo(connected);
 
             //
             // Query generates name records from device registry based on the passed proxy information.
             // these are then posted to the linker for linking.  When the first link is established
             // Connect returns successful, but proxy continues linking until disposed
             //
+            var queries = new List<Task<bool>>();
             if (endpoint == null || endpoint is AnySocketAddress) {
-                query.Post(Provider.NameService.NewQuery(Reference.All, NameRecordType.Proxy));
+                queries.Add(query.SendAsync(Provider.NameService.NewQuery(
+                    Reference.All, NameRecordType.Proxy), ct));
             }
             else {
                 while (endpoint.Family == AddressFamily.Bound) {
@@ -353,19 +407,21 @@ namespace Microsoft.Azure.Devices.Proxy {
 
                 if (endpoint.Family == AddressFamily.Collection) {
                     foreach (var item in ((SocketAddressCollection)endpoint).Addresses()) {
-                        await query.SendAsync(Provider.NameService.NewQuery(
-                            item.ToString(), NameRecordType.Proxy), ct);
+                        queries.Add(query.SendAsync(Provider.NameService.NewQuery(
+                            item.ToString(), NameRecordType.Proxy), ct));
                     }
                 }
                 else {
-                    query.Post(Provider.NameService.NewQuery(endpoint.ToString(), NameRecordType.Proxy));
+                    queries.Add(query.SendAsync(Provider.NameService.NewQuery(
+                        endpoint.ToString(), NameRecordType.Proxy), ct));
                 }
             }
 
-            // Finalize query - all queries were sent.
-            query.Complete();
-            // Signalled when the first one completed or user cancelled
+            await Task.WhenAll(queries.ToArray());
+            // Signalled when the first links is queued to connected block or user cancelled
             await tcs.Task.ConfigureAwait(false);
+
+            Console.WriteLine("Connected!");
         }
 
 
@@ -509,7 +565,5 @@ namespace Microsoft.Azure.Devices.Proxy {
         protected CancellationTokenSource _open = new CancellationTokenSource();
         protected readonly Dictionary<SocketOption, ulong> _optionCache = 
             new Dictionary<SocketOption, ulong>();
-        protected static readonly QueuedTaskScheduler _scheduler =
-            new QueuedTaskScheduler();
     }
 }

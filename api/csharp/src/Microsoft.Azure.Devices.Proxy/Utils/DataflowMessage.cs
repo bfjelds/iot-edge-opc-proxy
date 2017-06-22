@@ -17,26 +17,14 @@ namespace System.Threading.Tasks.Dataflow {
 
         /// <summary> Exceptions that occurred during processing </summary>
         public LinkedList<Exception> Exceptions { get; set; } = new LinkedList<Exception>();
-    }
 
-    public static class DataflowBlockEx {
+        public override string ToString() => $"{Arg} ({Exceptions.Count})";
 
-        public static bool Push<T>(this ITargetBlock<DataflowMessage<T>> block,
-            DataflowMessage<T> message, Exception exception) {
-            message.Exceptions.AddFirst(exception);
-            return block.Post(message);
-        }
-
-        public static bool Push<T>(this ITargetBlock<DataflowMessage<T>> block,
-            DataflowMessage<T> message) {
-            message.Exceptions.Clear();
-            return block.Post(message);
-        }
-
-        public static IPropagatorBlock<T, DataflowMessage<T>> DataflowMessageTransformBlock<T>() =>
+        public static IPropagatorBlock<T, DataflowMessage<T>> CreateAdapter() =>
             new TransformBlock<T, DataflowMessage<T>>(arg => new DataflowMessage<T> { Arg = arg });
 
-        public static IPropagatorBlock<T, DataflowMessage<T>> DataflowMessageTransformBlock<T>(ExecutionDataflowBlockOptions options) =>
+        public static IPropagatorBlock<T, DataflowMessage<T>> CreateAdapter(ExecutionDataflowBlockOptions options) =>
             new TransformBlock<T, DataflowMessage<T>>(arg => new DataflowMessage<T> { Arg = arg }, options);
+
     }
 }

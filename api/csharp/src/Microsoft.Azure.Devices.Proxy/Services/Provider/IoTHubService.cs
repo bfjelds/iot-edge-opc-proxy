@@ -117,7 +117,16 @@ namespace Microsoft.Azure.Devices.Proxy.Provider {
         /// <param name="results"></param>
         /// <param name="ct"></param>
         /// <returns></returns>
-        public ITargetBlock<IQuery> Lookup(ITargetBlock<INameRecord> results, CancellationToken ct) {
+        public IPropagatorBlock<IQuery, INameRecord> Lookup(ExecutionDataflowBlockOptions options) {
+            if (options == null) {
+                throw new ArgumentNullException(nameof(options));
+            }
+            var ct = options.CancellationToken;
+            if (ct == null) {
+                throw new ArgumentNullException(nameof(ct));
+            }
+
+            var results = new BufferBlock<INameRecord>(options);
             //
             // Create a completion action to complete the results when 
             // all queries complete, i.e. no more results will be pending.
@@ -137,10 +146,15 @@ namespace Microsoft.Azure.Devices.Proxy.Provider {
                 finally {
                     ca.End();
                 }
-            },
-            new ExecutionDataflowBlockOptions { CancellationToken = ct });
-            lookup.Completion.ContinueWith(_ => ca.Dispose());
-            return lookup;
+            }, options);
+
+            lookup.Completion.ContinueWith(t => {
+                if (t.IsFaulted) {
+                    ((IDataflowBlock)results).Fault(t.Exception);
+                }
+                ca.Dispose();
+            });
+            return DataflowBlock.Encapsulate(lookup, results);
         }
 
         /// <summary>
@@ -542,10 +556,8 @@ namespace Microsoft.Azure.Devices.Proxy.Provider {
                 return await InvokeDeviceMethodAsync(proxy, request, timeout,
                     ct).ConfigureAwait(false);
             }
-            catch (OperationCanceledException) {
-            }
-            catch (Exception e) {
-                ProxyEventSource.Log.HandledExceptionAsError(this, e);
+            catch (Exception) {
+                // Was logged before do not log again.
             }
             return null;
         }
@@ -579,10 +591,12 @@ namespace Microsoft.Azure.Devices.Proxy.Provider {
             /// <param name="message"></param>
             /// <param name="responseTimeout"></param>
             public MethodCallRequest(Message message, TimeSpan responseTimeout) {
-                if (responseTimeout > _maxTimeout)
+                if (responseTimeout > _maxTimeout) {
                     responseTimeout = _maxTimeout;
-                else if (responseTimeout < _minTimeout)
+                }
+                else if (responseTimeout < _minTimeout) {
                     responseTimeout = _minTimeout;
+                }
                 this.ResponseTimeoutInSeconds = (int)responseTimeout.TotalSeconds;
                 this.Payload = message;
             }

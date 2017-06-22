@@ -86,8 +86,8 @@ namespace Microsoft.Azure.Devices.Proxy.Provider {
             _listener.AcceptHandler = (c) => OnAcceptAsync(c);
 
             await _listener.OpenAsync(_cts.Token).ConfigureAwait(false);
-            _listenerTask = Task.Factory.StartNew(() => ListenAsync().Wait(), _cts.Token,
-                TaskCreationOptions.LongRunning, TaskScheduler.Default);
+            _listenerTask = Task.Factory.StartNew(async () => await ListenAsync(), _cts.Token,
+                TaskCreationOptions.LongRunning, TaskScheduler.Default).Unwrap();
 
             ProxyEventSource.Log.LocalListenerStarted(this);
         }

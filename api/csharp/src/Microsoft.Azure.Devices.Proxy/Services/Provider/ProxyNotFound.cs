@@ -8,12 +8,16 @@ namespace Microsoft.Azure.Devices.Proxy {
 
     public class ProxyNotFound : ProxyException {
 
-        public ProxyNotFound() : 
-            this(null) {
+        public ProxyNotFound(string message) : 
+            base(message, null, SocketError.NoHost) {
         }
 
         public ProxyNotFound(Exception innerException) :
-            base("Proxy not found", innerException) {
+            base("Proxy not found", innerException, SocketError.NoHost) {
+        }
+
+        public ProxyNotFound(AggregateException innerException) :
+            base("Proxy not found", innerException, SocketError.NoHost) {
         }
     }
 

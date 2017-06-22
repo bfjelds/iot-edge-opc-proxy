@@ -21,12 +21,12 @@ namespace Microsoft.Azure.Devices.Proxy {
         public static async Task<IEnumerable<INameRecord>> LookupAsync(this INameService service,
             IQuery query, CancellationToken ct) {
             var result = new List<INameRecord>();
-            var target = new ActionBlock<INameRecord>(n => result.Add(n),
-                new ExecutionDataflowBlockOptions { CancellationToken = ct });
-            var lookup = service.Lookup(target, ct);
+            var lookup = service.Lookup(new ExecutionDataflowBlockOptions { CancellationToken = ct });
             await lookup.SendAsync(query).ConfigureAwait(false);
+            while (await lookup.OutputAvailableAsync(ct).ConfigureAwait(false)) {
+                result.Add(await lookup.ReceiveAsync(ct).ConfigureAwait(false));
+            }
             lookup.Complete();
-            await target.Completion.ConfigureAwait(false);
             return result;
         }
 

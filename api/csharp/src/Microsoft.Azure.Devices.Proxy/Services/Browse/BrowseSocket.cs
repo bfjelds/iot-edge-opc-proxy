@@ -87,10 +87,7 @@ namespace Microsoft.Azure.Devices.Proxy {
                 throw new SocketException(SocketError.Closed);
             }
             var message = await ReceiveBlock.ReceiveAsync(ct).ConfigureAwait(false);
-            ProxySocket.ThrowIfFailed(message);
-            if (message.Error != (int)SocketError.Success) {
-                throw new SocketException((SocketError)message.Error);
-            }
+            ThrowIfFailed(message);
             if (message.TypeId != MessageContent.Data) {
                 throw new SocketException("No data message");
             }

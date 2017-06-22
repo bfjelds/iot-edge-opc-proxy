@@ -38,8 +38,7 @@ namespace Microsoft.Azure.Devices.Proxy {
         /// <param name="results">target block to post results to</param>
         /// <param name="ct">Cancel the current query in progress</param>
         /// <returns></returns>
-        ITargetBlock<IQuery> Lookup(ITargetBlock<INameRecord> results, 
-            CancellationToken ct);
+        IPropagatorBlock<IQuery, INameRecord> Lookup(ExecutionDataflowBlockOptions options);
 
         /// <summary>
         /// Post name record to add or update (true) the record in the name service

@@ -50,7 +50,7 @@ namespace Microsoft.Azure.Devices.Proxy.Provider {
         public Task OpenAsync(IMessageStream stream, CancellationToken ct) {
 
             // Link to action block sending in order
-            var sendTimeout = TimeSpan.FromSeconds(_pollTimeout * 2);
+            var sendTimeout = TimeSpan.FromMilliseconds(_pollTimeout * 2);
             stream.SendBlock.LinkTo(new ActionBlock<Message>(async (message) => {
                 message.Source = _streamId;
                 message.Target = _remoteId;
@@ -72,7 +72,7 @@ namespace Microsoft.Azure.Devices.Proxy.Provider {
             }));
 
             // Start producer receiving from poll
-            _producerTask = Task.Run(async () => {
+            _producerTask = Task.Factory.StartNew(async () => {
                 try {
                     while (true) {
                         var response = await _iotHub.TryInvokeDeviceMethodAsync(_link,
@@ -97,7 +97,7 @@ namespace Microsoft.Azure.Devices.Proxy.Provider {
                     stream.ReceiveBlock.Fault(e);
                     ProxyEventSource.Log.HandledExceptionAsError(this, e);
                 }
-            });
+            }, _open.Token, TaskCreationOptions.LongRunning, QueuedTaskScheduler.Priority[0]).Unwrap();
             return TaskEx.Completed;
         }
 
@@ -116,6 +116,6 @@ namespace Microsoft.Azure.Devices.Proxy.Provider {
         private readonly Reference _streamId;
         private readonly Reference _remoteId;
         private readonly INameRecord _link;
-        private static readonly ulong _pollTimeout = 60; // 60 seconds default poll timeout
+        private static readonly ulong _pollTimeout = 60000; // 60 seconds default poll timeout
     }
 }

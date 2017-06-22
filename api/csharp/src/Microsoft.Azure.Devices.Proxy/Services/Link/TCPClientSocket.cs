@@ -106,68 +106,95 @@ namespace Microsoft.Azure.Devices.Proxy {
             // Create tpl network for connect - prioritize input above errored attempts using
             // prioritized scheduling queue.
             //
-            var cts = new CancellationTokenSource();
-            ct.Register(() => cts.Cancel());
+            var input = DataflowMessage<INameRecord>.CreateAdapter(new ExecutionDataflowBlockOptions {
+                CancellationToken = ct,
+                MaxDegreeOfParallelism = DataflowBlockOptions.Unbounded,
+                MaxMessagesPerTask = DataflowBlockOptions.Unbounded,
+                TaskScheduler = QueuedTaskScheduler.Priority[127]
+            });
 
-            var input = DataflowBlockEx.DataflowMessageTransformBlock<INameRecord>(
-                new ExecutionDataflowBlockOptions {
-                    CancellationToken = cts.Token,
-                    TaskScheduler = _scheduler.ActivateNewQueue(0)
-                });
-            var errors = new BufferBlock<DataflowMessage<INameRecord>>(
-                new DataflowBlockOptions {
-                    CancellationToken = cts.Token,
-                    TaskScheduler = _scheduler.ActivateNewQueue(1)
-                });
+            var errors = new TransformBlock<DataflowMessage<INameRecord>, DataflowMessage<INameRecord>>(
+            async (error) => {
+                Console.WriteLine($"Error connecting to {Host}");
+                Host.RemoveReference(error.Arg.Address);
+                await Provider.NameService.Update.SendAsync(Tuple.Create(Host, true), ct);
+                return error;
+            },
+            new ExecutionDataflowBlockOptions {
+                CancellationToken = ct,
+                MaxDegreeOfParallelism = DataflowBlockOptions.Unbounded,
+                MaxMessagesPerTask = DataflowBlockOptions.Unbounded,
+                TaskScheduler = QueuedTaskScheduler.Priority[255]
+            });
 
-            var query = Provider.NameService.Lookup(input, cts.Token);
-            var pinger = Pinger(errors, Info.Address, cts.Token);
-            var linker = Linker(errors, false, cts.Token);
-            var connection = new WriteOnceBlock<IProxyLink>(null);
+            var query = Provider.NameService.Lookup(new ExecutionDataflowBlockOptions {
+                CancellationToken = ct,
+                MaxDegreeOfParallelism = DataflowBlockOptions.Unbounded,
+                MaxMessagesPerTask = DataflowBlockOptions.Unbounded,
+                TaskScheduler = QueuedTaskScheduler.Priority[127]
+            });
 
-            input.LinkTo(pinger);
-            errors.LinkTo(pinger);
-            pinger.LinkTo(linker);
-            linker.LinkTo(connection);
+            var pinger = CreatePingBlock(errors, Info.Address, new ExecutionDataflowBlockOptions {
+                CancellationToken = ct,
+                MaxDegreeOfParallelism = DataflowBlockOptions.Unbounded,
+                MaxMessagesPerTask = 1,
+                TaskScheduler = QueuedTaskScheduler.Priority[127]
+            });
+
+            var linker = CreateLinkBlock(errors, new ExecutionDataflowBlockOptions {
+                CancellationToken = ct,
+                MaxDegreeOfParallelism = 1, // Ensure one link is created at a time.
+                MaxMessagesPerTask = DataflowBlockOptions.Unbounded,
+                TaskScheduler = QueuedTaskScheduler.Priority[127]
+            });
+
+            var connection = new WriteOnceBlock<IProxyLink>(l => l, new DataflowBlockOptions {
+                MaxMessagesPerTask = 1, // Auto complete when loink is created
+                TaskScheduler = QueuedTaskScheduler.Priority[127]
+            });
+
+            query.ConnectTo(input);
+            input.ConnectTo(pinger);
+            errors.ConnectTo(pinger);
+            pinger.ConnectTo(linker);
+            linker.ConnectTo(connection);
 
             // Now post proxies to the lookup block - start by sending all bound addresses
+            var queries = new List<Task<bool>>();
             if (_boundEndpoint != null) {
                 // Todo - consider removing ping and try link only here...
 
                 if (_boundEndpoint.Family == AddressFamily.Collection) {
                     foreach (var item in ((SocketAddressCollection)_boundEndpoint).Addresses()) {
-                        await query.SendAsync(Provider.NameService.NewQuery(
-                            item.ToString(), NameRecordType.Proxy), cts.Token);
+                        queries.Add(query.SendAsync(Provider.NameService.NewQuery(
+                            item.ToString(), NameRecordType.Proxy), ct));
                     }
                 }
                 else {
-                    query.Post(Provider.NameService.NewQuery(_boundEndpoint.ToString(), NameRecordType.Proxy));
+                    queries.Add(query.SendAsync(Provider.NameService.NewQuery(
+                        _boundEndpoint.ToString(), NameRecordType.Proxy), ct));
                 }
             }
             else {
                 // Auto bind - send references for the host first
                 foreach (var item in Host.References) {
-                    await query.SendAsync(Provider.NameService.NewQuery(
-                        item, NameRecordType.Proxy), cts.Token);
+                    queries.Add(query.SendAsync(Provider.NameService.NewQuery(
+                        item, NameRecordType.Proxy), ct));
                 }
 
                 // Post remainder...
-                query.Post(Provider.NameService.NewQuery(Reference.All, NameRecordType.Proxy));
+                queries.Add(query.SendAsync(Provider.NameService.NewQuery(
+                    Reference.All, NameRecordType.Proxy), ct));
             }
 
+            await Task.WhenAll(queries.ToArray());
             // Finalize query operations.
             query.Complete();
 
             // Wait until a connected link is received.  Then cancel the remainder of the pipeline.
-            var link = await connection.ReceiveAsync(cts.Token);
-
-            // User might have cancelled - If so throw
-            ct.ThrowIfCancellationRequested();
-            Links.Add(link);
-            cts.Cancel();
-
-            Host.AddReference(link.RemoteId);
-            await Provider.NameService.AddOrUpdateAsync(Host, ct).ConfigureAwait(false);
+            Links.Add(await connection.ReceiveAsync(ct));
+            connection.Complete();
+            Provider.NameService.Update.Post(Tuple.Create(Host, true));
         }
 
         /// <summary>

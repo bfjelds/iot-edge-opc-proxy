@@ -23,10 +23,10 @@ namespace Microsoft.Azure.Devices.Proxy {
             var result = new List<INameRecord>();
             var lookup = service.Lookup(new ExecutionDataflowBlockOptions { CancellationToken = ct });
             await lookup.SendAsync(query).ConfigureAwait(false);
+            lookup.Complete();
             while (await lookup.OutputAvailableAsync(ct).ConfigureAwait(false)) {
                 result.Add(await lookup.ReceiveAsync(ct).ConfigureAwait(false));
             }
-            lookup.Complete();
             return result;
         }
 

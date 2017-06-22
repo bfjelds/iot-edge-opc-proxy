@@ -327,13 +327,13 @@ namespace Microsoft.Azure.Devices.Proxy {
                     lock (Links) {
                         linksFound = Links.Count();
                     }
-                        Console.WriteLine($"Exception connecting to {error}");
+// Console.WriteLine($"Exception connecting to {error}");
                     if (linksFound == 0 && error.Exceptions.Count < 5) {
                         return error.AsEnumerable();
                     }
                     else {
                         // Give up
-                        Console.WriteLine($"Give up {error}");
+// Console.WriteLine($"Give up {error}");
                         return Enumerable.Empty<DataflowMessage<INameRecord>>();
                     }
                 },
@@ -421,7 +421,7 @@ namespace Microsoft.Azure.Devices.Proxy {
             // Signalled when the first links is queued to connected block or user cancelled
             await tcs.Task.ConfigureAwait(false);
 
-            Console.WriteLine("Connected!");
+// Console.WriteLine("Connected!");
         }
 
 

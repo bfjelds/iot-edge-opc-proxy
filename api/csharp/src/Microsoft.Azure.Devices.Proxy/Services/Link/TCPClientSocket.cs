@@ -93,9 +93,11 @@ namespace Microsoft.Azure.Devices.Proxy {
                 // If there is no host in the registry, create a fake host record for this address
                 Host = new NameRecord(NameRecordType.Host, Info.Address.ToString());
             }
-            else if (!Host.Name.Equals(Info.Address.ToString(), StringComparison.CurrentCultureIgnoreCase)) {
-                // Translate the address to host address
-                Info.Address = new ProxySocketAddress(Host.Name);
+            else {
+                if (!Host.Name.Equals(Info.Address.ToString(), StringComparison.CurrentCultureIgnoreCase)) {
+                    // Translate the address to host address
+                    Info.Address = new ProxySocketAddress(Host.Name);
+                }
             }
 
             // Commit all options that were set until now into info
@@ -115,7 +117,7 @@ namespace Microsoft.Azure.Devices.Proxy {
 
             var errors = new TransformBlock<DataflowMessage<INameRecord>, DataflowMessage<INameRecord>>(
             async (error) => {
-                Console.WriteLine($"Error connecting to {Host}");
+// Console.WriteLine($"Error connecting to {Host}");
                 Host.RemoveReference(error.Arg.Address);
                 await Provider.NameService.Update.SendAsync(Tuple.Create(Host, true), ct);
                 return error;
@@ -176,25 +178,27 @@ namespace Microsoft.Azure.Devices.Proxy {
                 }
             }
             else {
-                // Auto bind - send references for the host first
-                foreach (var item in Host.References) {
-                    queries.Add(query.SendAsync(Provider.NameService.NewQuery(
-                        item, NameRecordType.Proxy), ct));
+                if (Host.References.Any()) {
+                    foreach (var item in Host.References) {
+                        queries.Add(query.SendAsync(Provider.NameService.NewQuery(
+                            item, NameRecordType.Proxy), ct));
+                    }
                 }
-
-                // Post remainder...
-                queries.Add(query.SendAsync(Provider.NameService.NewQuery(
-                    Reference.All, NameRecordType.Proxy), ct));
+                else {
+                    queries.Add(query.SendAsync(Provider.NameService.NewQuery(
+                        Reference.All, NameRecordType.Proxy), ct));
+                }
             }
 
             await Task.WhenAll(queries.ToArray());
-            // Finalize query operations.
-            query.Complete();
 
             // Wait until a connected link is received.  Then cancel the remainder of the pipeline.
-            Links.Add(await connection.ReceiveAsync(ct));
+            var link = await connection.ReceiveAsync(ct);
+            Links.Add(link);
             connection.Complete();
-            Provider.NameService.Update.Post(Tuple.Create(Host, true));
+            Host.AddReference(link.Proxy.Address);
+            var update = Provider.NameService.Update.SendAsync(Tuple.Create(Host, true), ct);
+            Console.WriteLine("Connected");
         }
 
         /// <summary>

@@ -51,5 +51,8 @@ namespace Microsoft.Azure.Devices.Proxy {
             MixToHash(Timeout.GetHashCode());
             MixToHash(SequenceNumber.GetHashCode());
         }
+
+        public override string ToString() =>
+            $"{SequenceNumber} Timeout: {Timeout}";
     }
 }

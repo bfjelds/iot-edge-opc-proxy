@@ -18,10 +18,14 @@ namespace Microsoft.Azure.Devices.Proxy {
             SerializerContext context, CancellationToken ct) {
 
             Message message = new Message();
-            await reader.ReadObjectHeaderAsync(ct).ConfigureAwait(false);
-            ushort version = await reader.ReadUInt16Async(ct).ConfigureAwait(false);
-            if (message.Version != version) {
-                throw new FormatException($"Bad message version {version}");
+            var members = await reader.ReadObjectHeaderAsync(ct).ConfigureAwait(false);
+            if (members != 9) {
+                throw new FormatException($"Unexpected number of properties {members}");
+            }
+
+            message.Version = await reader.ReadUInt32Async(ct).ConfigureAwait(false);
+            if ((message.Version >> 16) != (VersionEx.Assembly.ToUInt() >> 16)) {
+                throw new FormatException($"Bad message version {message.Version}");
             }
 
             message.Source = await context.Get<Reference>().ReadAsync(
@@ -31,6 +35,7 @@ namespace Microsoft.Azure.Devices.Proxy {
             message.Target = await context.Get<Reference>().ReadAsync(
                 reader, context, ct).ConfigureAwait(false);
 
+            message.SequenceId = await reader.ReadUInt32Async(ct).ConfigureAwait(false);
             message.Error = await reader.ReadInt32Async(ct).ConfigureAwait(false);
             message.IsResponse = await reader.ReadBoolAsync(ct).ConfigureAwait(false);
             message.TypeId = await reader.ReadUInt32Async(ct).ConfigureAwait(false);
@@ -122,9 +127,9 @@ namespace Microsoft.Azure.Devices.Proxy {
                 return;
             }
 
-            await writer.WriteObjectHeaderAsync(8, ct).ConfigureAwait(false);
+            await writer.WriteObjectHeaderAsync(9, ct).ConfigureAwait(false);
 
-            await writer.WriteAsync(message.Version, ct).ConfigureAwait(false);                              
+            await writer.WriteAsync(message.Version, ct).ConfigureAwait(false);
 
             await context.Get<Reference>().WriteAsync(                                 
                 writer, message.Source, context, ct).ConfigureAwait(false);
@@ -132,6 +137,8 @@ namespace Microsoft.Azure.Devices.Proxy {
                 writer, message.Proxy, context, ct).ConfigureAwait(false);
             await context.Get<Reference>().WriteAsync(                                 
                 writer, message.Target, context, ct).ConfigureAwait(false);
+
+            await writer.WriteAsync(message.SequenceId, ct).ConfigureAwait(false);
 
             await writer.WriteAsync(message.Error, ct).ConfigureAwait(false);                                
 
@@ -195,7 +202,7 @@ namespace Microsoft.Azure.Devices.Proxy {
             AddressFamily family = (AddressFamily)
                 await reader.ReadInt32Async(ct).ConfigureAwait(false);
             if (family == AddressFamily.Unspecified) {
-                result = new NullSocketAddress();
+                result = new AnySocketAddress();
             }
             else if (family == AddressFamily.Unix) {
                 if (members < 2) {

@@ -5,9 +5,9 @@
 
 namespace Microsoft.Azure.Devices.Proxy.Provider {
     using System;
-    using System.Threading.Tasks;
-    using System.Collections.Concurrent;
     using System.Threading;
+    using System.Threading.Tasks;
+    using System.Threading.Tasks.Dataflow;
 
     /// <summary>
     /// IoT Hub device method based message stream
@@ -25,10 +25,14 @@ namespace Microsoft.Azure.Devices.Proxy.Provider {
         public bool IsPolled { get; } = true;
 
         /// <summary>
-        /// Queue to read from 
+        /// Block to send to
         /// </summary>
-        public ConcurrentQueue<Message> ReceiveQueue { get; } =
-            new ConcurrentQueue<Message>();
+        public ITargetBlock<Message> SendBlock { get; private set; }
+
+        /// <summary>
+        /// Block to receive from
+        /// </summary>
+        public ISourceBlock<Message> ReceiveBlock { get; private set; }
 
         /// <summary>
         /// Constructor creating a method based polled stream.
@@ -44,7 +48,44 @@ namespace Microsoft.Azure.Devices.Proxy.Provider {
             _streamId = streamId;
             _remoteId = remoteId;
             _link = link;
+
             ConnectionString = connectionString;
+
+            ReceiveBlock = _receive = new BufferBlock<Message>(new DataflowBlockOptions {
+                NameFormat = "Receive (in Stream) Id={1}",
+                BoundedCapacity = 1,
+                EnsureOrdered = true,
+                MaxMessagesPerTask = DataflowBlockOptions.Unbounded,
+                CancellationToken = _open.Token
+            });
+
+            SendBlock = new ActionBlock<Message>(async (message) => {
+                if (message.TypeId != MessageContent.Data) {
+                    // No sending of anything but data
+                    return;
+                }
+                message.Source = _streamId;
+                message.Target = _remoteId;
+                try {
+                    var response = await _iotHub.TryInvokeDeviceMethodWithRetryAsync(
+                        _link, message, TimeSpan.FromMilliseconds(_pollTimeout * 2),
+                        _open.Token).ConfigureAwait(false);
+                    if (!_open.IsCancellationRequested && response.Error != (int)SocketError.Success) {
+                        throw new SocketException("Failure during send.", (SocketError)response.Error);
+                    }
+                }
+                catch (OperationCanceledException) {
+                }
+                catch (Exception e) {
+                    ProxyEventSource.Log.HandledExceptionAsError(this, e);
+                    throw;
+                }
+            }, new ExecutionDataflowBlockOptions {
+                NameFormat = "Send (in Stream) Id={1}",
+                CancellationToken = _open.Token,
+                MaxDegreeOfParallelism = 1,
+                EnsureOrdered = true
+            });
         }
 
         /// <summary>
@@ -53,6 +94,44 @@ namespace Microsoft.Azure.Devices.Proxy.Provider {
         /// <param name="ct"></param>
         /// <returns></returns>
         public Task<IMessageStream> OpenAsync(CancellationToken ct) {
+
+            // Link to action block sending in order
+            var sendTimeout = TimeSpan.FromMilliseconds(_pollTimeout * 2);
+
+            // Start producer receiving from poll
+            _producerTask = Task.Factory.StartNew(async () => {
+                try {
+                    ulong nextSequenceNumber = 0;
+                    while(true) {
+
+                        var response = await _iotHub.TryInvokeDeviceMethodAsync(_link,
+                            new Message(_streamId, _remoteId, 
+                                new PollRequest(_pollTimeout, nextSequenceNumber)
+                            ),
+                            sendTimeout, _open.Token).ConfigureAwait(false);
+                        //
+                        // Poll receives back a timeout error in case no data was available 
+                        // within the requested timeout. This is decoupled from the consumers
+                        // that time out on their cancellation tokens.
+                        //
+                        if (response != null && response.Error != (int)SocketError.Timeout) {
+                            if (!await _receive.SendAsync(response).ConfigureAwait(false)) {
+                                break;
+                            }
+                            nextSequenceNumber++;
+                        }
+                        // Continue polling until closed in which case we complete receive
+                        _open.Token.ThrowIfCancellationRequested();
+                    }
+                }
+                catch(OperationCanceledException) {
+                }
+                catch (Exception e) {
+                    ProxyEventSource.Log.HandledExceptionAsError(this, e);
+                    throw;
+                }
+            }, _open.Token, TaskCreationOptions.LongRunning, TaskScheduler.Default).Unwrap();
+
             return Task.FromResult((IMessageStream)this);
         }
 
@@ -61,50 +140,17 @@ namespace Microsoft.Azure.Devices.Proxy.Provider {
         /// </summary>
         /// <returns></returns>
         public Task CloseAsync() {
-            return Task.FromResult(true);
+            _open.Cancel();
+            return TaskEx.Completed;
         }
 
-        /// <summary>
-        /// Sends a poll request and enqueues result to receive queue.
-        /// </summary>
-        /// <param name="ct"></param>
-        /// <returns></returns>
-        public async Task ReceiveAsync(CancellationToken ct) {
-            Message response = await _iotHub.TryInvokeDeviceMethodAsync(_link,
-                new Message(_streamId, _remoteId, new PollRequest(30000)),
-                    TimeSpan.FromMinutes(1), ct).ConfigureAwait(false);
-            if (response != null) {
-                ReceiveQueue.Enqueue(response);
-            }
-        }
-
-        /// <summary>
-        /// Send data message
-        /// </summary>
-        /// <param name="message"></param>
-        /// <param name="ct"></param>
-        /// <returns></returns>
-        public async Task SendAsync(Message message, CancellationToken ct) {
-            message.Source = _streamId;
-            message.Target = _remoteId;
-            try {
-                var response = await Retry.Do(ct,
-                    () => _iotHub.InvokeDeviceMethodAsync(
-                        _link, message, TimeSpan.FromMinutes(1), ct),
-                    (e) => !ct.IsCancellationRequested, Retry.NoBackoff, 
-                        int.MaxValue).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) {
-                throw;
-            }
-            catch (Exception e) {
-                ProxyEventSource.Log.HandledExceptionAsError(this, e);
-            }
-        }
-
+        private Task _producerTask;
+        private readonly CancellationTokenSource _open = new CancellationTokenSource();
+        private readonly BufferBlock<Message> _receive;
         private readonly IoTHubService _iotHub;
         private readonly Reference _streamId;
         private readonly Reference _remoteId;
         private readonly INameRecord _link;
+        private static readonly ulong _pollTimeout = 120000; // 120 seconds default poll timeout
     }
 }

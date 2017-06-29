@@ -50,11 +50,6 @@ namespace Microsoft.Azure.Devices.Proxy {
             SocketAddress = socketAddress;
         }
 
-        /// <summary>
-        /// Comparison
-        /// </summary>
-        /// <param name="that"></param>
-        /// <returns></returns>
         public override bool IsEqual(PingResponse that) {
             return
                 IsEqual(SocketAddress, that.SocketAddress) &&
@@ -67,5 +62,7 @@ namespace Microsoft.Azure.Devices.Proxy {
             MixToHash(PhysicalAddress);
             MixToHash(TimeMs);
         }
+
+        public override string ToString() => $"{SocketAddress}";
     }
 }

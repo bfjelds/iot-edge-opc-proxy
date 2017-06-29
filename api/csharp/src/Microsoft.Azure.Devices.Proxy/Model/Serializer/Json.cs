@@ -70,6 +70,9 @@ namespace Microsoft.Azure.Devices.Proxy {
                 // Hand this message to the content converter as existing object
                 message.Content = new MessageReferencePlaceHolder { Ref = message };
                 serializer.Populate(reader, message);
+                if ((message.Version >> 16) != (VersionEx.Assembly.ToUInt() >> 16)) {
+                    throw new FormatException($"Bad message version {message.Version}");
+                }
                 return message;
             }
 
@@ -165,7 +168,7 @@ namespace Microsoft.Azure.Devices.Proxy {
                 AddressFamily family = (AddressFamily)jsonObject.Value<int>("family");
                 switch(family) {
                     case AddressFamily.Unspecified:
-                        return new NullSocketAddress();
+                        return new AnySocketAddress();
                     case AddressFamily.Unix:
                         return jsonObject.ToObject<UnixSocketAddress>();
                     case AddressFamily.Proxy:

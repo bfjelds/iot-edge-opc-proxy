@@ -58,5 +58,9 @@ namespace Microsoft.Azure.Devices.Proxy {
             MixToHash(BytesReceived);
             MixToHash(ErrorCode);
         }
+
+        public override string ToString() =>
+            $"Open for {TimeSpan.FromMilliseconds(TimeOpenInMilliseconds)} " +
+            $"(Received/Sent: {BytesReceived}/{BytesSent}, CloseReason: {ErrorCode})";
     }
 }

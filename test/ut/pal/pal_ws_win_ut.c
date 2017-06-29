@@ -957,6 +957,7 @@ TEST_FUNCTION(pal_win_wsclient_connect__neg_2)
         .IgnoreArgument(1).IgnoreArgument(2).IgnoreArgument(4)
         .CopyOutArgumentBuffer_lpBuffer(&k_message, sizeof(const char*))
         .SetReturn(0);
+    STRICT_EXPECTED_CALL(string_trim_back((char*)k_message, "\r\n\t "));
     STRICT_EXPECTED_CALL(LocalFree((HLOCAL)k_message))
         .SetReturn((HLOCAL)NULL);
 
@@ -1095,6 +1096,7 @@ TEST_FUNCTION(pal_win_wsclient_can_recv__neg)
         .IgnoreArgument(1).IgnoreArgument(2).IgnoreArgument(4)
         .CopyOutArgumentBuffer_lpBuffer(&k_message, sizeof(const char*))
         .SetReturn(0);
+    STRICT_EXPECTED_CALL(string_trim_back((char*)k_message, "\r\n\t "));
     STRICT_EXPECTED_CALL(LocalFree((HLOCAL)k_message))
         .SetReturn((HLOCAL)NULL);
     STRICT_EXPECTED_CALL(pal_wsclient_event_handler_mock((void*)0x1, pal_wsclient_event_end_recv, IGNORED_PTR_ARG, IGNORED_PTR_ARG, IGNORED_PTR_ARG, er_aborted))
@@ -1230,6 +1232,7 @@ TEST_FUNCTION(pal_win_wsclient_can_send__neg)
         .IgnoreArgument(1).IgnoreArgument(2).IgnoreArgument(4)
         .CopyOutArgumentBuffer_lpBuffer(&k_message, sizeof(const char*))
         .SetReturn(0);
+    STRICT_EXPECTED_CALL(string_trim_back((char*)k_message, "\r\n\t "));
     STRICT_EXPECTED_CALL(LocalFree((HLOCAL)k_message))
         .SetReturn((HLOCAL)NULL);
     STRICT_EXPECTED_CALL(pal_wsclient_event_handler_mock((void*)0x1, pal_wsclient_event_end_send, IGNORED_PTR_ARG, IGNORED_PTR_ARG, NULL, er_aborted))

@@ -45,11 +45,6 @@ namespace Microsoft.Azure.Devices.Proxy {
         [DataMember(Name = "max_recv", Order = 5)]
         public uint MaxReceiveBuffer { get; set; } = 0;
 
-        /// <summary>
-        /// Comparison
-        /// </summary>
-        /// <param name="that"></param>
-        /// <returns></returns>
         public override bool IsEqual(OpenRequest that) {
             return
                 IsEqual(StreamId, that.StreamId) &&
@@ -64,5 +59,8 @@ namespace Microsoft.Azure.Devices.Proxy {
             MixToHash(StreamId);
             MixToHash(ConnectionString);
         }
+
+        public override string ToString() =>
+            $"{StreamId} (Polled: {IsPolled})";
     }
 }

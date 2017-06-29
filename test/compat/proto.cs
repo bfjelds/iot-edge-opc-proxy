@@ -611,7 +611,7 @@ namespace Microsoft.Azure.Devices.Proxy.Model {
 
             // Arrange
             DataMessage args = new DataMessage();
-            args.Source = new NullSocketAddress();
+            args.Source = new AnySocketAddress();
             args.Payload = new byte[600];
             args.Control = new byte[50];
             new Random().NextBytes(args.Payload);
@@ -638,7 +638,7 @@ namespace Microsoft.Azure.Devices.Proxy.Model {
             args1.ConnectionString = "dfksjaödfjkasdfölskajdfölsadfjkslöajksadlöjksdlöfsjkadflösdajkfösdlafj";
             args1.IsPolled = false;
             DataMessage args2 = new DataMessage();
-            args2.Source = new NullSocketAddress();
+            args2.Source = new AnySocketAddress();
             args2.Payload = new byte[600];
             args2.Control = new byte[0];
             new Random().NextBytes(args2.Payload);
@@ -666,17 +666,17 @@ namespace Microsoft.Azure.Devices.Proxy.Model {
 
             // Arrange
             DataMessage args1 = new DataMessage();
-            args1.Source = new NullSocketAddress();
+            args1.Source = new AnySocketAddress();
             args1.Payload = new byte[145];
             args1.Control = new byte[0];
             new Random().NextBytes(args1.Payload);
             DataMessage args2 = new DataMessage();
-            args2.Source = new NullSocketAddress();
+            args2.Source = new AnySocketAddress();
             args2.Payload = new byte[600];
             args2.Control = new byte[0];
             new Random().NextBytes(args2.Payload);
             DataMessage args3 = new DataMessage();
-            args3.Source = new NullSocketAddress();
+            args3.Source = new AnySocketAddress();
             args3.Payload = new byte[400];
             args3.Control = new byte[30];
             new Random().NextBytes(args3.Payload);
@@ -1059,7 +1059,7 @@ namespace Microsoft.Azure.Devices.Proxy.Model {
 
             // Arrange
             DataMessage args = new DataMessage();
-            args.Source = new NullSocketAddress();
+            args.Source = new AnySocketAddress();
             args.Payload = new byte[600];
             args.Control = new byte[50];
             new Random().NextBytes(args.Payload);

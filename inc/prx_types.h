@@ -202,7 +202,7 @@ typedef struct prx_addrinfo
 {
     prx_socket_address_t address;                    // Address
     int32_t reserved;  // Used to mark whether it needs freeing
-    char* name;                   // Canonical name of the host
+    const char* name;             // Canonical name of the host
 }
 prx_addrinfo_t;
 

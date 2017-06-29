@@ -4,22 +4,51 @@
 // ------------------------------------------------------------
 
 namespace Microsoft.Azure.Devices.Proxy.Provider {
-    using Proxy;
-    using System.Threading.Tasks;
     using System;
+    using System.Threading.Tasks;
+    using Proxy;
 
     /// <summary>
     /// Provider that uses relay as stream channel, instead of the default 
     /// implementation
     /// </summary>
     public class RelayProvider : DefaultProvider {
-
         private IStreamService _relay;
         public override IStreamService StreamService {
             get {
                 return _relay;
             }
         }
+
+        public static Task<IProvider> CreateAsync() => 
+            ServiceBusRelayProvider.CreateAsync((string)null, (string)null);
+
+        /// <summary>
+        /// Private constructor
+        /// </summary>
+        /// <param name="iothub"></param>
+        /// <param name="relay"></param>
+        internal RelayProvider(ConnectionString iothub, IStreamService relay) :
+            base(iothub) {
+            _relay = relay;
+        }
+
+        /// <summary>
+        /// Private constructor
+        /// </summary>
+        /// <param name="iothub"></param>
+        /// <param name="relay"></param>
+        internal RelayProvider(string iothub, IStreamService relay) :
+            base(iothub) {
+            _relay = relay;
+        }
+    }
+
+    /// <summary>
+    /// Provider that uses relay as stream channel, instead of the default 
+    /// implementation
+    /// </summary>
+    public class ServiceBusRelayProvider {
 
         /// <summary>
         /// Create relay provider
@@ -61,26 +90,5 @@ namespace Microsoft.Azure.Devices.Proxy.Provider {
         /// <returns></returns>
         public static Task<IProvider> CreateAsync() =>
             CreateAsync((string)null, (string)null);
-
-
-        /// <summary>
-        /// Private constructor
-        /// </summary>
-        /// <param name="iothub"></param>
-        /// <param name="relay"></param>
-        private RelayProvider(ConnectionString iothub, IStreamService relay) :
-            base(iothub) {
-            _relay = relay;
-        }
-
-        /// <summary>
-        /// Private constructor
-        /// </summary>
-        /// <param name="iothub"></param>
-        /// <param name="relay"></param>
-        private RelayProvider(string iothub, IStreamService relay) :
-            base(iothub) {
-            _relay = relay;
-        }
     }
 }

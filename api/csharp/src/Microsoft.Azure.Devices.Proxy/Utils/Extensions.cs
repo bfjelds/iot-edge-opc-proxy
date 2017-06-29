@@ -66,18 +66,23 @@ namespace Microsoft.Azure.Devices.Proxy {
         }
 
         public static SocketError GetSocketError(this Exception ex) {
-            SocketError error = SocketError.Fatal;
-            if (ex is SocketException) {
-                return ((SocketException)ex).Error;
+            var s = GetFirstOf<SocketException>(ex);
+            return s != null ? s.GetSocketError() : SocketError.Fatal;
+        }
+
+        public static T GetFirstOf<T>(this Exception ex) where T : Exception{
+            if (ex is T) {
+                return (T)ex;
             }
             else if (ex is AggregateException) {
                 foreach (Exception e in ((AggregateException)ex).InnerExceptions) {
-                    error = e.GetSocketError();
-                    if (error != SocketError.Fatal)
-                        break;
+                    var found = GetFirstOf<T>(e);
+                    if (found != null) {
+                        return found;
+                    }
                 }
             }
-            return error;
+            return null;
         }
     }
 }

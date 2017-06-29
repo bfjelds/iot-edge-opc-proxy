@@ -45,13 +45,10 @@ namespace Microsoft.Azure.Devices.Proxy {
             Properties = properties;
         }
 
-        /// <summary>
-        /// Comparison
-        /// </summary>
-        /// <param name="that"></param>
-        /// <returns></returns>
+
         public override bool IsEqual(LinkRequest that) {
-            return IsEqual(Version, that.Version) &&
+            return 
+                IsEqual(Version, that.Version) &&
                 IsEqual(Properties, that.Properties);
         }
 
@@ -59,5 +56,7 @@ namespace Microsoft.Azure.Devices.Proxy {
             MixToHash(Version);
             MixToHash(Properties);
         }
+
+        public override string ToString() => Properties.ToString();
     }
 }

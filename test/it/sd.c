@@ -33,7 +33,7 @@ static int32_t pal_sd_result_printer(
 )
 {
     pal_sd_browse_result_t* rec = (pal_sd_browse_result_t*)result;
-    pal_sd_resolve_result_t* res = (pal_sd_resolve_result_t*)result;
+    pal_sd_service_entry_t* res = (pal_sd_service_entry_t*)result;
     sd_ctx_t* ctx = (sd_ctx_t*)context;
 
     if (error != er_ok)
@@ -56,7 +56,7 @@ static int32_t pal_sd_result_printer(
         printf("[SVC] %s I:%x  D: %s  T: %s  N: %s \n", flags & pal_sd_result_removed ? "REM" : "   ",
             itf_index, rec->domain, rec->service_type, rec->service_name);
         break;
-    case pal_sd_result_resolve:
+    case pal_sd_result_entry:
         printf("[RES]   ->: %s:%d  I:%x \n", res->addr->host, 
             res->addr->port, itf_index);
         for (size_t i = 0; i < res->records_len; i++)

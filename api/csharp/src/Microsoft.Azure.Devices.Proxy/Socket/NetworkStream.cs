@@ -42,9 +42,7 @@ namespace Microsoft.Azure.Devices.Proxy {
         //
         // Creates a new NetworkStream class
         //
-        public NetworkStream(Socket socket) : 
-            this(socket, false) {
-        }
+        public NetworkStream(Socket socket) : this(socket, false) {}
 
         //
         // Returns the underlying socket 
@@ -71,52 +69,44 @@ namespace Microsoft.Azure.Devices.Proxy {
         // Indicates that data can be read from the stream.
         //
         public override bool CanRead {
-            get { return Readable; }
+            get => Readable; 
         }
 
         //
         // Cannot seek
         //
         public override bool CanSeek {
-            get { return false; }
+            get => false; 
         }
 
         //
         // Indicates that data can be written to the stream.
         //
         public override bool CanWrite {
-            get { return Writeable; }
+            get => Writeable; 
         }
 
         //
         // Can always timeout
         //
         public override bool CanTimeout {
-            get { return true; }
+            get => true; 
         }
 
         // 
         // Returns the read timeout
         //
         public override int ReadTimeout {
-            get {
-                return Socket.ReceiveTimeout;
-            }
-            set {
-                Socket.ReceiveTimeout = value;
-            }
+            get => Socket.ReceiveTimeout;
+            set => Socket.ReceiveTimeout = value;
         }
 
         // 
         // Returns the write timeout 
         //
         public override int WriteTimeout {
-            get {
-                return Socket.SendTimeout;
-            }
-            set {
-                Socket.SendTimeout = value;
-            }
+            get => Socket.SendTimeout;
+            set => Socket.SendTimeout = value;
         }
 
         //
@@ -439,50 +429,39 @@ namespace Microsoft.Azure.Devices.Proxy {
         //
         // Flushes data from the stream.
         //
-        public override void Flush() {
-        }
-
+        public override void Flush() {}
+        
         //
         // Same no op but async
         //
-        public override Task FlushAsync(CancellationToken cancellationToken) {
-            return (Task)Task.FromResult(false);
-        }
+        public override Task FlushAsync(CancellationToken cancellationToken) =>
+            TaskEx.Completed;
 
         //
         // Always throws NotSupportedException.
         //
         public override long Length {
-            get {
-                throw new NotSupportedException("seek not supported on network streams");
-            }
+            get => throw new NotSupportedException("seek not supported on network streams");
         }
 
         //
         // Always throws NotSupportedException
         //
-        public override void SetLength(long value) {
+        public override void SetLength(long value) =>
             throw new NotSupportedException("seek not supported on network streams");
-        }
 
         //
         // Always throws NotSupportedException.
         //
         public override long Position {
-            get {
-                return Length;
-            }
-            set {
-                SetLength(value);
-            }
+            get => Length;
+            set => SetLength(value);
         }
 
         //
         // Always throws NotSupportedException.
         //
-        public override long Seek(long offset, SeekOrigin origin) {
-            return Length;
-        }
+        public override long Seek(long offset, SeekOrigin origin) => Length;
 
         #region internal
         //

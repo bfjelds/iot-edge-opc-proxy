@@ -34,15 +34,13 @@ namespace Microsoft.Azure.Devices.Proxy {
             OptionValue = optionValue;
         }
 
-        /// <summary>
-        /// Comparison
-        /// </summary>
-        /// <param name="that"></param>
-        /// <returns></returns>
         public override bool IsEqual(GetOptResponse that) =>
             IsEqual(OptionValue, that.OptionValue);
 
         protected override void SetHashCode() =>
             MixToHash(OptionValue);
+
+        public override string ToString() =>
+            OptionValue.ToString();
     }
 }

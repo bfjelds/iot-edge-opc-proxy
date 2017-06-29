@@ -271,17 +271,18 @@ static void io_ws_connection_free(
     io_ws_connection_t* connection
 )
 {
+    bool connected;
     dbg_assert_ptr(connection);
     dbg_assert_is_task(connection->scheduler);
 
+    connected = connection->status == io_ws_connection_status_connected;
     connection->status = io_ws_connection_status_closing;
 
-    if (connection->status == io_ws_connection_status_connected)
+    if (connected)
     {
         // Wait for disconnect to complete
-        log_debug(connection->log,
-            "connection %p closing... waiting for disconnect!",
-            connection);
+        log_trace(connection->log,
+            "connection %p closing... waiting for disconnect!", connection);
         pal_wsclient_disconnect(connection->wsclient);
         return;
     }
@@ -289,9 +290,8 @@ static void io_ws_connection_free(
     if (connection->wsclient)
     {
         // Wait for close to complete
-        log_debug(connection->log,
-            "connection %p closing... waiting for close!",
-            connection);
+        log_trace(connection->log, 
+            "connection %p closing... waiting for close!", connection);
         pal_wsclient_close(connection->wsclient);
         return;
     }
@@ -318,7 +318,7 @@ static void io_ws_connection_free(
     if (connection->pwd_header_key)
         STRING_delete(connection->pwd_header_key);
     
-    log_debug(connection->log, "connection %p freed!", connection);
+    log_trace(connection->log, "connection %p freed!", connection);
     mem_free_type(io_ws_connection_t, connection);
 }
 
@@ -471,11 +471,14 @@ static void io_ws_connection_on_disconnected(
     dbg_assert_is_task(connection->scheduler);
     /**/ if (connection->status == io_ws_connection_status_closing)
     {
-        // Continue freeing connection
-        log_debug(connection->log,
-            "connection %p disconnected... continue to close!",
-            connection);
-        __do_next(connection, io_ws_connection_free);
+        if (connection->wsclient)
+        {
+            // Continue freeing connection
+            log_debug(connection->log,
+                "connection %p disconnected... continue to close!",
+                connection);
+            __do_next(connection, io_ws_connection_free);
+        }
     }
     else if (connection->status == io_ws_connection_status_connected)
     {

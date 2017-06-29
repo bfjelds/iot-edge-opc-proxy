@@ -25,5 +25,7 @@ namespace Microsoft.Azure.Devices.Proxy {
         protected override void SetHashCode() {
             MixToHash(0);
         }
+
+        public override string ToString() => "void";
     }
 }

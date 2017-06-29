@@ -135,6 +135,8 @@ namespace Microsoft.Azure.Devices.Proxy {
                 ;
         }
 
+        public override string ToString() => $"Record {Id} for {Name} with address {Address}";
+
         public override bool IsEqual(NameRecord other) => Equals(other as INameRecord);
 
         protected override void SetHashCode() => MixToHash(Address);

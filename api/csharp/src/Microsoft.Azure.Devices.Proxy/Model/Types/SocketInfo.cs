@@ -97,11 +97,11 @@ namespace Microsoft.Azure.Devices.Proxy {
         /// <returns></returns>
         public override string ToString() {
             var str = new StringBuilder();
-            str.Append("Type: "); str.Append(Type.ToString());
-            str.Append("Protocol: "); str.Append(Protocol.ToString());
-            str.Append("Family: "); str.Append(Family.ToString());
-            str.Append("Address: "); str.Append(Address.ToString());
-            str.Append("Flags: "); str.Append(Flags.ToString());
+            str.Append(" Type: "); str.Append(Type.ToString());
+            str.Append(" Protocol: "); str.Append(Protocol.ToString());
+            str.Append(" Family: "); str.Append(Family.ToString());
+            str.Append(" Address: "); str.Append(Address.ToString());
+            str.Append(" Flags: "); str.Append(Flags.ToString());
             return str.ToString();
         }
     }

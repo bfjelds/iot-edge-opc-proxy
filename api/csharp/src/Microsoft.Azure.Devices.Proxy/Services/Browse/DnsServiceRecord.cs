@@ -10,7 +10,7 @@ namespace Microsoft.Azure.Devices.Proxy {
     /// Represents an abstract service record. In the case of dns-sd, this is the 
     /// record pointed to by PTR. 
     /// </summary>
-    public class DnsServiceRecord : IEquatable<DnsServiceRecord> {
+    public class DnsServiceRecord : Poco<DnsServiceRecord> {
 
         /// <summary>
         /// Name of service 
@@ -157,43 +157,17 @@ namespace Microsoft.Azure.Devices.Proxy {
             return record;
         }
 
-        /// <summary>
-        /// Comparison
-        /// </summary>
-        /// <param name="that"></param>
-        /// <returns></returns>
-        public bool Equals(DnsServiceRecord that) {
-            if (that == null) {
-                return false;
-            }
-            if (string.IsNullOrEmpty(this.Name)) {
-                if (!string.IsNullOrEmpty(that.Name))
-                    return false;
-            }
-            else if (!this.Name.Equals(that.Name))
-                return false;
-            if (string.IsNullOrEmpty(this.Type)) {
-                if (!string.IsNullOrEmpty(that.Type))
-                    return false;
-            }
-            else if (!this.Type.Equals(that.Type))
-                return false;
-            if (string.IsNullOrEmpty(this.Domain)) {
-                if (!string.IsNullOrEmpty(that.Domain))
-                    return false;
-            }
-            else if (!this.Domain.Equals(that.Domain))
-                return false;
-            return true;
+        public override bool IsEqual(DnsServiceRecord that) {
+            return
+                IsEqual(Name, that.Name) &&
+                IsEqual(Type, that.Type) &&
+                IsEqual(Domain, that.Domain);
         }
 
-        /// <summary>
-        /// Comparison
-        /// </summary>
-        /// <param name="that"></param>
-        /// <returns></returns>
-        public override bool Equals(object that) {
-            return Equals(that as DnsServiceRecord);
+        protected override void SetHashCode() {
+            MixToHash(Name);
+            MixToHash(Type);
+            MixToHash(Domain);
         }
 
         /// <summary>
@@ -202,12 +176,6 @@ namespace Microsoft.Azure.Devices.Proxy {
         /// <returns></returns>
         public override string ToString() => 
             $"{FullString} on {Interface}{(Removed ? " REMOVED" : "")}";
-
-        /// <summary>
-        /// Returns hash for efficient lookup in list
-        /// </summary>
-        /// <returns></returns>
-        public override int GetHashCode() => ToString().GetHashCode();
 
 
         private ushort _flags = 0;

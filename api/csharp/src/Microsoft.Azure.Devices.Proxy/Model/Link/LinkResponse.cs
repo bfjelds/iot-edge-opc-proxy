@@ -32,11 +32,6 @@ namespace Microsoft.Azure.Devices.Proxy {
         [DataMember(Name = "peer_address", Order = 3)]
         public SocketAddress PeerAddress { get; set; }
 
-        /// <summary>
-        /// Comparison
-        /// </summary>
-        /// <param name="that"></param>
-        /// <returns></returns>
         public override bool IsEqual(LinkResponse that) {
             return IsEqual(LinkId, that.LinkId) &&
                 IsEqual(LocalAddress, that.LocalAddress) &&
@@ -48,5 +43,8 @@ namespace Microsoft.Azure.Devices.Proxy {
             MixToHash(LocalAddress);
             MixToHash(PeerAddress);
         }
+
+        public override string ToString() =>
+            $"{LinkId} (Local: {LocalAddress}, Peer: {PeerAddress})";
     }
 }

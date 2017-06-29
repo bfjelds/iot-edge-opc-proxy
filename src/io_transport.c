@@ -20,11 +20,6 @@
 #define API_VERSION "2016-11-14"
 
 //
-// The max delay in publishing log telemetry
-//
-#define LOG_PUBLISH_INTERVAL 2000
-
-//
 // Connection base
 //
 typedef struct io_iot_hub_connection
@@ -44,10 +39,13 @@ typedef struct io_iot_hub_umqtt_connection
     io_iot_hub_connection_t base;           // Common connection members
     io_mqtt_connection_t* mqtt_connection; // Underlying mqtt connection
     STRING_HANDLE event_uri;             // Preallocated event topic uri
+#define LOG_PUBLISH_INTERVAL    (2 * 1000)
     io_stream_t* log_stream;         // to publish log stream content to
     prx_scheduler_t* scheduler;  // plus Scheduler to pump log telemetry
     io_mqtt_subscription_t* subscription;   // Receiver subscription ...
     prx_buffer_factory_t* buffer_pool;       // plus dynamic buffer pool
+#define ALIVE_PUBLISH_INTERVAL (10 * 1000)
+    bool alive;                       // Whether the connection is alive
     log_t log;
 }
 io_iot_hub_umqtt_connection_t;
@@ -143,6 +141,9 @@ static void io_iot_hub_umqtt_connection_on_close(
 )
 {
     dbg_assert_ptr(connection);
+    dbg_assert_is_task(connection->scheduler);
+
+    connection->alive = false;
 
     if (connection->subscription)
         io_mqtt_subscription_release(connection->subscription);
@@ -179,7 +180,7 @@ static void io_iot_hub_umqtt_connection_on_send_complete(
 //
 // Push log stream content periodically
 //
-static void io_iot_hub_umqtt_server_transport_send_telemetry(
+static void io_iot_hub_umqtt_connection_send_log_telemetry(
     io_iot_hub_umqtt_connection_t* connection
 )
 {
@@ -217,8 +218,36 @@ static void io_iot_hub_umqtt_server_transport_send_telemetry(
         prx_buffer_release(connection->buffer_pool, buffer);
 
     // Reschedule...
-    __do_later(connection, io_iot_hub_umqtt_server_transport_send_telemetry, 
+    __do_later(connection, io_iot_hub_umqtt_connection_send_log_telemetry, 
         LOG_PUBLISH_INTERVAL);
+}
+
+//
+// Push alive property periodically
+//
+static void io_iot_hub_umqtt_connection_send_alive_property(
+    io_iot_hub_umqtt_connection_t* connection
+)
+{
+    int32_t result;
+    const char* publish;
+
+    publish = !connection->alive ? "{ \"alive\": 0 }" :
+        "{"
+         "\"module\": \"" MODULE_VERSION "\","
+         "\"alive\": 1 "
+        "}";
+    result = io_mqtt_connection_publish(connection->mqtt_connection,
+        "$iothub/twin/PATCH/properties/reported/?$rid=1", NULL, 
+        (const uint8_t*)publish, strlen(publish) + 1, NULL, NULL);
+    if (result != er_ok)
+    {
+        log_error(connection->log, "Failed to publish %s (%s)", 
+            publish, prx_err_string(result));
+    }
+    // Reschedule...
+    __do_later(connection, io_iot_hub_umqtt_connection_send_alive_property,
+        ALIVE_PUBLISH_INTERVAL);
 }
 
 //
@@ -307,13 +336,13 @@ static int32_t io_iot_hub_umqtt_connection_on_send(
         if (message->type == io_message_type_data ||
             message->type == io_message_type_poll)
         {
-            log_trace(connection->log, "OUT: [%s]",
-                io_message_type_as_string(message->type));
+            log_trace(connection->log, "OUT: [%s#%u]",
+                io_message_type_as_string(message->type), message->seq_id);
         }
         else
         {
-            log_info(connection->log, "OUT: [%s]",
-                io_message_type_as_string(message->type));
+            log_info(connection->log, "OUT: [%s#%u]",
+                io_message_type_as_string(message->type), message->seq_id);
         }
 
         // Buffer now contains json encoded response, send through transport
@@ -429,13 +458,13 @@ static void io_iot_hub_umqtt_connection_on_receive(
         if (message->type == io_message_type_data ||
             message->type == io_message_type_poll)
         {
-            log_trace(connection->log, "IN: [%s]", 
-                io_message_type_as_string(message->type));
+            log_trace(connection->log, "IN: [%s#%u]", 
+                io_message_type_as_string(message->type), message->seq_id);
         }
         else
         {
-            log_info(connection->log, "IN: [%s]", 
-                io_message_type_as_string(message->type));
+            log_info(connection->log, "IN: [%s#%u]", 
+                io_message_type_as_string(message->type), message->seq_id);
         }
 
         result = connection->base.handler_cb(
@@ -565,6 +594,9 @@ static int32_t io_iot_hub_umqtt_server_transport_create_connection(
         if (result != er_ok)
             break;
 
+        connection->alive = true;
+        __do_next(connection, io_iot_hub_umqtt_connection_send_alive_property);
+
         if (__prx_config_get_int(prx_config_key_log_telemetry, 0))
         {
             connection->log_stream = log_stream_get();
@@ -574,10 +606,10 @@ static int32_t io_iot_hub_umqtt_server_transport_create_connection(
             else
             {
                 // Start sending initial logs
-                __do_next(connection,
-                    io_iot_hub_umqtt_server_transport_send_telemetry);
+                __do_next(connection, io_iot_hub_umqtt_connection_send_log_telemetry);
             }
         }
+
 
         STRING_delete(path);
         path = NULL;
@@ -775,8 +807,7 @@ static int32_t io_iot_hub_ws_connection_receive_handler(
     do
     {
         // Get new empty protocol message from message pool
-        result = io_message_create_empty(
-            connection->base.message_pool, &message);
+        result = io_message_create_empty(connection->base.message_pool, &message);
         if (result != er_ok)
         {
             log_error(connection->log, "Failed creating protocol message (%s)",
@@ -800,7 +831,8 @@ static int32_t io_iot_hub_ws_connection_receive_handler(
             break;
         }
 
-        log_debug(connection->log, "IN: [%s]", io_message_type_as_string(message->type));
+        log_trace(connection->log, "IN: [%s#%u]", 
+            io_message_type_as_string(message->type), message->seq_id);
 
         result = connection->base.handler_cb(
             connection->base.handler_cb_ctx, io_connection_received, message);

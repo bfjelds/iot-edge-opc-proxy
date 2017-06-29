@@ -41,7 +41,7 @@ int32_t io_decode_prx_addrinfo(
 
     __io_decode_type_begin(ctx, prx_ai, 2);
     __io_decode_object(ctx, prx_socket_address, prx_ai, address);
-    result = io_decode_string_default(ctx, "name", &prx_ai->name);
+    result = io_decode_string_default(ctx, "name", (char**)&prx_ai->name);
     if (result != er_ok)
         return result;
     __io_decode_type_end(ctx);

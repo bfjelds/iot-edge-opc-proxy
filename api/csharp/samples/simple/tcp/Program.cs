@@ -10,6 +10,7 @@ namespace Microsoft.Azure.Devices.Proxy.Samples {
     using System.Threading.Tasks;
     using System.Linq;
     using Microsoft.Azure.Devices.Proxy;
+    using System.Threading;
 
     class Program {
 
@@ -22,6 +23,8 @@ namespace Microsoft.Azure.Devices.Proxy.Samples {
             else
                 host_name = System.Net.Dns.GetHostName();
 
+            // Socket.Provider = Provider.ServiceBusRelayProvider.CreateAsync().Result;
+
             //
             // Simple TCP/IP Services
             //
@@ -31,45 +34,45 @@ namespace Microsoft.Azure.Devices.Proxy.Samples {
             // Port 17: quotd http://tools.ietf.org/html/rfc865
             //
             for (int j = 1; ; j++) {
+#if PERF
                 Console.Clear();
                 Console.Out.WriteLine($"#{j} Sync tests...");
-#if !PERF
-                for (int i = 0; i < j + 1; i++) {
-                    try {
-                        SendReceive(7, Encoding.UTF8.GetBytes("Simple test to echo server"));
-                        Receive(19);
-                        Receive(13);
-                        Receive(17);
-                        Receive(19);
-                        EchoLoop(j+1);
-                    }
-                    catch (Exception e) {
-                        Console.Out.WriteLine(e.ToString());
-                    }
+                try {
+                    SendReceive(7, Encoding.UTF8.GetBytes("Simple test to echo server"));
+                    Receive(19);
+                    Receive(13);
+                    Receive(17);
+                    Receive(19);
+                    EchoLoop(j+1);
+                }
+                catch (Exception e) {
+                    Console.Out.WriteLine(e.ToString());
+                    Thread.Sleep(4000);
                 }
 #endif
                 Console.Clear();
                 Console.Out.WriteLine($"#{j} Async tests...");
+                var tasks = new List<Task>();
                 try {
-                    var tasks = new List<Task>();
-
                     for (int i = 0; i < j + 1; i++) {
                         tasks.Add(ReceiveAsync(i, 19));
                         tasks.Add(ReceiveAsync(i, 13));
                         tasks.Add(ReceiveAsync(i, 17));
                         tasks.Add(EchoLoopAsync(i, 5));
                     }
-                    while (tasks.Any()) {
-                        int index = Task.WaitAny(tasks.ToArray());
-                        var task = tasks.ElementAt(index);
-                        tasks.RemoveAt(index);
-                        if (task.IsFaulted) {
-                            Console.Out.WriteLine(task.Exception.ToString());
-                        }
+
+                    Task.WaitAll(tasks.ToArray(), new CancellationTokenSource(TimeSpan.FromMinutes(10)).Token);
+                    Console.Out.WriteLine($"#{j} ... complete!");
+                }
+                catch (OperationCanceledException) {
+                    foreach (var pending in tasks) {
+                        Console.Out.WriteLine($"{pending}  did not complete after 1 hour");
                     }
+                    Thread.Sleep(4000);
                 }
                 catch (Exception e) {
                     Console.Out.WriteLine(e.ToString());
+                    Thread.Sleep(4000);
                 }
             }
         }
@@ -129,12 +132,12 @@ namespace Microsoft.Azure.Devices.Proxy.Samples {
 
         public static async Task EchoLoopAsync(int index, int loops) {
             using (Socket s = new Socket(SocketType.Stream, ProtocolType.Tcp)) {
-                await s.ConnectAsync(host_name, 7);
+                await s.ConnectAsync(host_name, 7, CancellationToken.None);
                 Console.Out.WriteLine($"EchoLoopAsync #{index}: Connected!");
                 for (int i = 0; i < loops; i++) {
                     await EchoLoopAsync1(index, s, i);
                 }
-                await s.CloseAsync();
+                await s.CloseAsync(CancellationToken.None);
             }
             Console.Out.WriteLine($"EchoLoopAsync #{index}.  Done!");
         }
@@ -142,10 +145,10 @@ namespace Microsoft.Azure.Devices.Proxy.Samples {
         public static async Task ReceiveAsync(int index, int port) {
             byte[] buffer = new byte[1024];
             using (TcpClient client = new TcpClient()) {
-                await client.ConnectAsync(host_name, port);
+                await client.ConnectAsync(host_name, port, CancellationToken.None);
                 Console.Out.WriteLine($"ReceiveAsync #{index}: Connected to port {port}!.  Read ...");
                 using (NetworkStream str = client.GetStream()) {
-                    int read = await str.ReadAsync(buffer);
+                    int read = await str.ReadAsync(buffer, 0, buffer.Length, CancellationToken.None);
                     Console.Out.WriteLine($"{Encoding.UTF8.GetString(buffer, 0, read)}     #{index}");
                 }
             }
@@ -154,23 +157,33 @@ namespace Microsoft.Azure.Devices.Proxy.Samples {
 
         public static async Task SendReceiveAsync(int index, int port, byte[] buffer) {
             using (TcpClient client = new TcpClient()) {
-                await client.ConnectAsync(host_name, port);
+                await client.ConnectAsync(host_name, port, CancellationToken.None);
                 Console.Out.WriteLine($"SendReceiveAsync #{index}: Connected to port {port}!.  Write ...");
                 NetworkStream str = client.GetStream();
-                await str.WriteAsync(buffer);
-                int read = await str.ReadAsync(buffer);
+                await str.WriteAsync(buffer, 0, buffer.Length, CancellationToken.None);
+                int read = await str.ReadAsync(buffer, 0, buffer.Length, CancellationToken.None);
                 Console.Out.WriteLine(Encoding.UTF8.GetString(buffer, 0, read));
             }
             Console.Out.WriteLine($"SendReceiveAsync #{index} port {port}.  Done!");
         }
 
         private static async Task EchoLoopAsync1(int index, Socket s, int i) {
-            var msg = Encoding.UTF8.GetBytes(string.Format("{0,6} async loop #{1} to echo server", i, index));
-            await s.SendAsync(msg);
+            ushort id = (ushort)(short.MaxValue * _rand.NextDouble());
+            var msg = Encoding.UTF8.GetBytes(
+                string.Format("{0,6} async loop #{1} to echo server {2}", i, index, id));
+            await s.SendAsync(msg, 0, msg.Length, CancellationToken.None);
             byte[] buffer = new byte[msg.Length];
-            int count = await s.ReceiveAsync(buffer);
-            Console.Out.WriteLine("({1,6}) received '{0}' ... (#{2})",
-                Encoding.UTF8.GetString(buffer, 0, count), i, index);
+            try {
+                int count = await s.ReceiveAsync(buffer, 0, buffer.Length);
+                Console.Out.WriteLine("({1,6}) received '{0}' ... (#{2}, {3})",
+                    Encoding.UTF8.GetString(buffer, 0, count), i, index, id);
+            }
+            catch {
+                Console.Out.WriteLine("Failed to receive {1,6} '{0}'... (#{2}, {3})",
+                    Encoding.UTF8.GetString(msg, 0, msg.Length), i, index, id);
+                throw;
+            }
         }
+        static Random _rand = new Random();
     }
 }

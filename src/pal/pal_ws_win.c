@@ -119,6 +119,7 @@ static int32_t pal_wsclient_from_winhttp_error(
         (char*)&message, 0, NULL);
     if (message)
     {
+        string_trim_back(message, "\r\n\t ");
         log_error(NULL, "%s (%d)", message, error);
         LocalFree(message);
     }
@@ -633,7 +634,18 @@ static void CALLBACK pal_wsclient_winhttp_cb(
     switch (status)
     {
     case WINHTTP_CALLBACK_STATUS_SENDREQUEST_COMPLETE:
-        dbg_assert(handle == wsclient->h_request, "");
+        if (handle != wsclient->h_request)
+        {
+            if (!wsclient->h_request)
+                log_trace(wsclient->log, "Request complete but handle was closed!");
+            else
+            {
+                log_error(wsclient->log, "Unexpected error: Bad handle passed.");
+                wsclient->cb(wsclient->context, pal_wsclient_event_connected,
+                    NULL, NULL, NULL, er_arg);
+            }
+            break;
+        }
         if (!WinHttpReceiveResponse(handle, NULL))
         {
             result = GetLastError();

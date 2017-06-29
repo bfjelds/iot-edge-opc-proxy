@@ -68,7 +68,10 @@ namespace Microsoft.Azure.Devices.Proxy {
         /// </summary>
         /// <param name="hash"></param>
         protected void MixToHash(int hash) {
-            _hash = (_hash ?? _offsetBasis ^ hash) * _prime;
+            if (hash == 0) {
+                return;
+            }
+            _hash = ((_hash ?? _offsetBasis) ^ hash) * _prime;
         }
 
         /// <summary>
@@ -77,7 +80,7 @@ namespace Microsoft.Azure.Devices.Proxy {
         /// <param name="hash"></param>
         protected void MixToHash(IEnumerable enumeration) {
             foreach (var item in enumeration) {
-                MixToHash(item.GetHashCode());
+                MixToHash(item);
             }
         }
 
@@ -89,7 +92,7 @@ namespace Microsoft.Azure.Devices.Proxy {
             if (item is IEnumerable) {
                 MixToHash((IEnumerable)item);
             }
-            else {
+            else if (item != null) {
                 MixToHash(item.GetHashCode());
             }
         }

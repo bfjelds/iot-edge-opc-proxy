@@ -59,7 +59,7 @@ namespace Microsoft.Azure.Devices.Proxy {
         /// Enumerator to iterate through text record key value pairs
         /// </summary>
         /// <returns></returns>
-        public IEnumerator<KeyValuePair<String, String>> GetEnumerator() {
+        public IEnumerator<KeyValuePair<string, string>> GetEnumerator() {
             foreach (var item in TxtRecords) {
                 yield return item.AsKeyValuePair();
             }
@@ -69,8 +69,8 @@ namespace Microsoft.Azure.Devices.Proxy {
 
         public override bool IsEqual(DnsServiceEntry that) {
             return
-                Service.Equals(that.Service) &&
-                Address.Equals(that.Address) &&
+                IsEqual(Service, that.Service) &&
+                IsEqual(Address, that.Address) &&
                 TxtRecords.SequenceEqual(that.TxtRecords);
         }
 
@@ -86,13 +86,14 @@ namespace Microsoft.Azure.Devices.Proxy {
         /// <returns></returns>
         public override string ToString() {
             var bld = new StringBuilder();
-            bld.AppendLine(Service.ToString());
-            bld.AppendLine(Address.ToString());
+            bld.Append(Service.ToString());
+            bld.Append("@");
+            bld.Append(Address.ToString());
             for (int i = 0; i < TxtRecords.Length; i++) {
-                bld.Append("  [");
+                bld.Append(",  [");
                 bld.Append(i);
                 bld.Append("] ");
-                bld.AppendLine(TxtRecords[i].ToString());
+                bld.Append(TxtRecords[i].ToString());
             }
             return bld.ToString();
         }

@@ -564,7 +564,7 @@ static void io_mqtt_connection_receive_message(
     properties = STRING_construct(props);
     payload = mqttmessage_getApplicationMsg(msg_handle);
     
-    log_trace(subscription->log, "RECV [size: %08d]", payload->length);
+    log_debug(subscription->log, "RECV [size: %08d]", payload->length);
     // Do callback
     subscription->receiver_cb(subscription->receiver_ctx,
         (io_mqtt_properties_t*)properties, payload->message, payload->length);
@@ -604,7 +604,7 @@ static int32_t io_mqtt_connection_handle_PUBLISH_ACK(
         return er_not_found; 
     }
 
-    log_trace(connection->log, "SENT [size: %08d, took %d]",
+    log_debug(connection->log, "SENT [size: %08d, took %d]",
         message->buf_len, ticks_get() - message->attempted);
     io_mqtt_connection_clear_failures(connection);
     

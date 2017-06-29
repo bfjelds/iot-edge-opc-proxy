@@ -35,16 +35,13 @@ namespace Microsoft.Azure.Devices.Proxy {
             this.SocketAddress = socketAddress;
         }
 
-
-        /// <summary>
-        /// Comparison
-        /// </summary>
-        /// <param name="that"></param>
-        /// <returns></returns>
         public override bool IsEqual(PingRequest that) =>
             IsEqual(SocketAddress, that.SocketAddress);
 
         protected override void SetHashCode() =>
             MixToHash(SocketAddress);
+
+        public override string ToString() => 
+            $"{SocketAddress}";
     }
 }

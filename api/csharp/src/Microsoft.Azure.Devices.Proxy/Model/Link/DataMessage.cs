@@ -8,6 +8,7 @@
 namespace Microsoft.Azure.Devices.Proxy {
     using System;
     using System.Runtime.Serialization;
+    using System.Text;
 
     /// <summary>
     /// Stream data message payload
@@ -66,11 +67,6 @@ namespace Microsoft.Azure.Devices.Proxy {
             Control = new byte[0];
         }
 
-        /// <summary>
-        /// Comparison
-        /// </summary>
-        /// <param name="that"></param>
-        /// <returns></returns>
         public override bool IsEqual(DataMessage that) {
             return
                 IsEqual(SequenceNumber, that.SequenceNumber) &&
@@ -84,6 +80,36 @@ namespace Microsoft.Azure.Devices.Proxy {
             MixToHash(Payload);
             MixToHash(Control);
             MixToHash(Source);
+        }
+
+        public override string ToString() {
+            var bld = new StringBuilder();
+            bld.Append("[");
+            bld.Append(SequenceNumber);
+            bld.Append("] ");
+#if DEBUG
+            if (Payload == null) {
+                bld.Append("null");
+            }
+            else {
+                string content;
+                try {
+                    content = Encoding.UTF8.GetString(Payload);
+                }
+                catch {
+                    content = BitConverter.ToString(Payload);
+                }
+                var length = content.IndexOf('\n');
+                if (length == -1) {
+                    length = Math.Min(512, content.Length);
+                }
+                else {
+                    length--;
+                }
+                bld.Append(content, 0, length);
+            }
+#endif
+            return bld.ToString();
         }
     }
 }

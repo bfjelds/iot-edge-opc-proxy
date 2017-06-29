@@ -942,7 +942,7 @@ int32_t pal_os_to_prx_addrinfo(
         return result;
 
     if (ai->ai_canonname)
-        result = string_clone(ai->ai_canonname, &prx_ai->name);
+        result = string_clone(ai->ai_canonname, (char**)&prx_ai->name);
     else
         prx_ai->name = NULL;
     return result;
@@ -1100,7 +1100,7 @@ int32_t pal_freeaddrinfo(
     for (int32_t i = 0; info[i].reserved != 0; i++)
     {
         if (info[i].name)
-            mem_free(info[i].name);
+            mem_free((char*)info[i].name);
     }
 
     mem_free(info);
